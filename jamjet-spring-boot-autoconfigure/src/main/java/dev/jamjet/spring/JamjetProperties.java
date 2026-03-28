@@ -39,6 +39,9 @@ public class JamjetProperties {
     /** Human-in-the-loop approval configuration. */
     private Approval approval = new Approval();
 
+    /** Observability configuration. */
+    private Observability observability = new Observability();
+
     public String getRuntimeUrl() {
         return runtimeUrl;
     }
@@ -101,6 +104,14 @@ public class JamjetProperties {
 
     public void setApproval(Approval approval) {
         this.approval = approval;
+    }
+
+    public Observability getObservability() {
+        return observability;
+    }
+
+    public void setObservability(Observability observability) {
+        this.observability = observability;
     }
 
     /**
@@ -189,6 +200,45 @@ public class JamjetProperties {
 
         public void setDefaultDecision(String defaultDecision) {
             this.defaultDecision = defaultDecision;
+        }
+    }
+
+    /**
+     * Observability configuration ({@code spring.jamjet.observability.*}).
+     */
+    public static class Observability {
+
+        /** Enable Micrometer metrics (on by default when actuator present). */
+        private boolean micrometer = true;
+
+        /** Enable OpenTelemetry spans (opt-in). */
+        private boolean opentelemetry = false;
+
+        /** Metric name prefix. */
+        private String metricPrefix = "jamjet";
+
+        public boolean isMicrometer() {
+            return micrometer;
+        }
+
+        public void setMicrometer(boolean micrometer) {
+            this.micrometer = micrometer;
+        }
+
+        public boolean isOpentelemetry() {
+            return opentelemetry;
+        }
+
+        public void setOpentelemetry(boolean opentelemetry) {
+            this.opentelemetry = opentelemetry;
+        }
+
+        public String getMetricPrefix() {
+            return metricPrefix;
+        }
+
+        public void setMetricPrefix(String metricPrefix) {
+            this.metricPrefix = metricPrefix;
         }
     }
 }

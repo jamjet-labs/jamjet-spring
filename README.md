@@ -93,8 +93,67 @@ public class MyApp {
 ## Roadmap
 
 - **Phase 2**: Audit trails + human-in-the-loop approval
-- **Phase 3**: JUnit 5 replay testing + Micrometer/OpenTelemetry observability
+- ✓ **Phase 3**: JUnit 5 replay testing + Micrometer/OpenTelemetry observability (COMPLETE)
 - **Phase 4**: LangChain4j, Quarkus, and A2A bridge integrations
+
+## Testing (`jamjet-spring-boot-starter-test`)
+
+Add to your test dependencies:
+
+```xml
+<dependency>
+    <groupId>dev.jamjet</groupId>
+    <artifactId>jamjet-spring-boot-starter-test</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+    <scope>test</scope>
+</dependency>
+```
+
+**Replay tests** — replay production executions in JUnit 5:
+
+```java
+@WithJamjetRuntime
+class MyAgentTest {
+
+    @Test
+    @ReplayExecution("exec-abc123")
+    void agentProducesConsistentOutput(RecordedExecution execution) {
+        AgentAssertions.assertThat(execution)
+            .completedSuccessfully()
+            .usedTool("WebSearch")
+            .completedWithin(30, TimeUnit.SECONDS)
+            .costLessThan(0.50);
+    }
+}
+```
+
+**Deterministic stubs** — no LLM calls needed:
+
+```java
+var stub = DeterministicModelStub.builder()
+    .onPromptContaining("weather", "Sunny, 72F")
+    .defaultResponse("I don't know")
+    .build();
+```
+
+## Observability
+
+**Micrometer** (on by default when actuator present):
+
+```properties
+spring.jamjet.observability.micrometer=true
+spring.jamjet.observability.metric-prefix=jamjet
+```
+
+Metrics: `jamjet.execution.duration`, `jamjet.execution.count`, `jamjet.node.duration`, `jamjet.tool.calls`, `jamjet.execution.cost.usd`
+
+**OpenTelemetry** (opt-in):
+
+```properties
+spring.jamjet.observability.opentelemetry=true
+```
+
+Span hierarchy: `jamjet.execution` → `jamjet.node.{id}` → `jamjet.tool.{name}`
 
 ## License
 

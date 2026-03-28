@@ -33,6 +33,12 @@ public class JamjetProperties {
     /** Read timeout in seconds. */
     private int readTimeoutSeconds = 120;
 
+    /** Audit trail configuration. */
+    private Audit audit = new Audit();
+
+    /** Human-in-the-loop approval configuration. */
+    private Approval approval = new Approval();
+
     public String getRuntimeUrl() {
         return runtimeUrl;
     }
@@ -79,5 +85,110 @@ public class JamjetProperties {
 
     public void setReadTimeoutSeconds(int readTimeoutSeconds) {
         this.readTimeoutSeconds = readTimeoutSeconds;
+    }
+
+    public Audit getAudit() {
+        return audit;
+    }
+
+    public void setAudit(Audit audit) {
+        this.audit = audit;
+    }
+
+    public Approval getApproval() {
+        return approval;
+    }
+
+    public void setApproval(Approval approval) {
+        this.approval = approval;
+    }
+
+    /**
+     * Audit trail configuration ({@code spring.jamjet.audit.*}).
+     */
+    public static class Audit {
+
+        /** Enable audit trail logging. */
+        private boolean enabled = true;
+
+        /** Include full prompt text in audit entries. */
+        private boolean includePrompts = true;
+
+        /** Include full response text in audit entries. */
+        private boolean includeResponses = true;
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public boolean isIncludePrompts() {
+            return includePrompts;
+        }
+
+        public void setIncludePrompts(boolean includePrompts) {
+            this.includePrompts = includePrompts;
+        }
+
+        public boolean isIncludeResponses() {
+            return includeResponses;
+        }
+
+        public void setIncludeResponses(boolean includeResponses) {
+            this.includeResponses = includeResponses;
+        }
+    }
+
+    /**
+     * Human-in-the-loop approval configuration ({@code spring.jamjet.approval.*}).
+     */
+    public static class Approval {
+
+        /** Enable approval workflow (opt-in). */
+        private boolean enabled = false;
+
+        /** External webhook URL for approval notifications (Slack, email, etc.). */
+        private String webhookUrl;
+
+        /** Max time to wait for an approval before timing out. */
+        private String timeout = "30m";
+
+        /** What happens on timeout: "approved" or "rejected". */
+        private String defaultDecision = "rejected";
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public String getWebhookUrl() {
+            return webhookUrl;
+        }
+
+        public void setWebhookUrl(String webhookUrl) {
+            this.webhookUrl = webhookUrl;
+        }
+
+        public String getTimeout() {
+            return timeout;
+        }
+
+        public void setTimeout(String timeout) {
+            this.timeout = timeout;
+        }
+
+        public String getDefaultDecision() {
+            return defaultDecision;
+        }
+
+        public void setDefaultDecision(String defaultDecision) {
+            this.defaultDecision = defaultDecision;
+        }
     }
 }

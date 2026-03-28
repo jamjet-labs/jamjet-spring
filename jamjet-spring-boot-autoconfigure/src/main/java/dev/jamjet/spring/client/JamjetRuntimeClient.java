@@ -102,6 +102,40 @@ public class JamjetRuntimeClient implements AutoCloseable {
                 .toList();
     }
 
+    // ── Audit ──────────────────────────────────────────────────────────────────
+
+    /** Query audit log entries with optional filters. */
+    public AuditPage queryAudit(String executionId, String actorId, String eventType,
+                                int limit, int offset) {
+        var sb = new StringBuilder("/api/v1/audit?limit=").append(limit).append("&offset=").append(offset);
+        if (executionId != null && !executionId.isBlank()) {
+            sb.append("&execution_id=").append(executionId);
+        }
+        if (actorId != null && !actorId.isBlank()) {
+            sb.append("&actor_id=").append(actorId);
+        }
+        if (eventType != null && !eventType.isBlank()) {
+            sb.append("&event_type=").append(eventType);
+        }
+        return get(sb.toString(), AuditPage.class);
+    }
+
+    /** Send an external event (used for audit logging from advisors). */
+    public void sendExternalEvent(String executionId, String correlationKey,
+                                  Map<String, Object> payload) {
+        post("/api/v1/executions/" + executionId + "/external-event",
+                Map.of("correlation_key", correlationKey, "payload", payload),
+                new TypeReference<Map<String, Object>>() {});
+    }
+
+    // ── Approval ──────────────────────────────────────────────────────────────
+
+    /** Approve or reject a paused execution. */
+    public ApproveResponse approveExecution(String executionId, ApprovalDecision decision) {
+        return post("/api/v1/executions/" + executionId + "/approve", decision,
+                ApproveResponse.class);
+    }
+
     // ── Internal HTTP helpers ─────────────────────────────────────────────────
 
     private <T> T get(String path, Class<T> responseType) {

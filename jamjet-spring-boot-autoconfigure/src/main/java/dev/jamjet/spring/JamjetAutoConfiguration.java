@@ -7,11 +7,15 @@ import dev.jamjet.spring.approval.ApprovalWaitRegistry;
 import dev.jamjet.spring.approval.JamjetApprovalController;
 import dev.jamjet.spring.audit.JamjetAuditService;
 import dev.jamjet.spring.client.JamjetRuntimeClient;
+import dev.jamjet.spring.observability.JamjetMicrometerBridge;
+import dev.jamjet.spring.observability.JamjetOtelBridge;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.ChatClientCustomizer;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -111,5 +115,30 @@ public class JamjetAutoConfiguration {
             JamjetRuntimeClient client, ApprovalWaitRegistry waitRegistry) {
         log.info("Registering JamJet approval REST controller at /jamjet/approvals");
         return new JamjetApprovalController(client, waitRegistry);
+    }
+
+    // ── Observability ────────────────────────────────────────────────────
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnClass(MeterRegistry.class)
+    @ConditionalOnBean(MeterRegistry.class)
+    @ConditionalOnProperty(prefix = "spring.jamjet.observability", name = "micrometer",
+                           havingValue = "true", matchIfMissing = true)
+    public JamjetMicrometerBridge jamjetMicrometerBridge(
+            MeterRegistry registry, JamjetProperties properties) {
+        log.info("Enabling JamJet Micrometer metrics bridge");
+        return new JamjetMicrometerBridge(registry, properties);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnClass(name = "io.opentelemetry.api.trace.Tracer")
+    @ConditionalOnProperty(prefix = "spring.jamjet.observability", name = "opentelemetry",
+                           havingValue = "true")
+    public JamjetOtelBridge jamjetOtelBridge(
+            io.opentelemetry.api.trace.Tracer tracer, JamjetProperties properties) {
+        log.info("Enabling JamJet OpenTelemetry tracing bridge");
+        return new JamjetOtelBridge(tracer, properties);
     }
 }

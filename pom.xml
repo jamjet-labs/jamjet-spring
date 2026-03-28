@@ -36,6 +36,7 @@
         <module>jamjet-spring-boot-starter</module>
         <module>jamjet-spring-boot-starter-example</module>
         <module>jamjet-spring-boot-starter-test</module>
+        <module>langchain4j-jamjet</module>
     </modules>
 
     <properties>
@@ -50,6 +51,7 @@
         <slf4j.version>2.0.16</slf4j.version>
         <opentelemetry.version>1.44.1</opentelemetry.version>
         <testcontainers.version>1.20.4</testcontainers.version>
+        <langchain4j.version>1.12.2</langchain4j.version>
     </properties>
 
     <dependencyManagement>
@@ -83,6 +85,11 @@
             <dependency>
                 <groupId>dev.jamjet</groupId>
                 <artifactId>jamjet-spring-boot-starter-test</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>dev.jamjet</groupId>
+                <artifactId>langchain4j-jamjet</artifactId>
                 <version>${project.version}</version>
             </dependency>
         </dependencies>

@@ -7,9 +7,6 @@ import dev.jamjet.spring.approval.ApprovalWaitRegistry;
 import dev.jamjet.spring.approval.JamjetApprovalController;
 import dev.jamjet.spring.audit.JamjetAuditService;
 import dev.jamjet.spring.client.JamjetRuntimeClient;
-import dev.jamjet.spring.observability.JamjetMicrometerBridge;
-import dev.jamjet.spring.observability.JamjetOtelBridge;
-import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
@@ -22,6 +19,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
 
 /**
  * Auto-configuration for JamJet durable execution with Spring AI.
@@ -119,26 +117,36 @@ public class JamjetAutoConfiguration {
 
     // ── Observability ────────────────────────────────────────────────────
 
-    @Bean
-    @ConditionalOnMissingBean
-    @ConditionalOnClass(MeterRegistry.class)
-    @ConditionalOnBean(MeterRegistry.class)
+    @Configuration
+    @ConditionalOnClass(name = "io.micrometer.core.instrument.MeterRegistry")
     @ConditionalOnProperty(prefix = "spring.jamjet.observability", name = "micrometer",
                            havingValue = "true", matchIfMissing = true)
-    public JamjetMicrometerBridge jamjetMicrometerBridge(
-            MeterRegistry registry, JamjetProperties properties) {
-        log.info("Enabling JamJet Micrometer metrics bridge");
-        return new JamjetMicrometerBridge(registry, properties);
+    static class MicrometerConfiguration {
+
+        @Bean
+        @ConditionalOnMissingBean
+        @ConditionalOnBean(io.micrometer.core.instrument.MeterRegistry.class)
+        public dev.jamjet.spring.observability.JamjetMicrometerBridge jamjetMicrometerBridge(
+                io.micrometer.core.instrument.MeterRegistry registry, JamjetProperties properties) {
+            LoggerFactory.getLogger(JamjetAutoConfiguration.class)
+                    .info("Enabling JamJet Micrometer metrics bridge");
+            return new dev.jamjet.spring.observability.JamjetMicrometerBridge(registry, properties);
+        }
     }
 
-    @Bean
-    @ConditionalOnMissingBean
+    @Configuration
     @ConditionalOnClass(name = "io.opentelemetry.api.trace.Tracer")
     @ConditionalOnProperty(prefix = "spring.jamjet.observability", name = "opentelemetry",
                            havingValue = "true")
-    public JamjetOtelBridge jamjetOtelBridge(
-            io.opentelemetry.api.trace.Tracer tracer, JamjetProperties properties) {
-        log.info("Enabling JamJet OpenTelemetry tracing bridge");
-        return new JamjetOtelBridge(tracer, properties);
+    static class OtelConfiguration {
+
+        @Bean
+        @ConditionalOnMissingBean
+        public dev.jamjet.spring.observability.JamjetOtelBridge jamjetOtelBridge(
+                io.opentelemetry.api.trace.Tracer tracer, JamjetProperties properties) {
+            LoggerFactory.getLogger(JamjetAutoConfiguration.class)
+                    .info("Enabling JamJet OpenTelemetry tracing bridge");
+            return new dev.jamjet.spring.observability.JamjetOtelBridge(tracer, properties);
+        }
     }
 }

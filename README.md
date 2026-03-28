@@ -94,7 +94,8 @@ public class MyApp {
 
 - **Phase 2**: Audit trails + human-in-the-loop approval
 - ✓ **Phase 3**: JUnit 5 replay testing + Micrometer/OpenTelemetry observability (COMPLETE)
-- **Phase 4**: LangChain4j, Quarkus, and A2A bridge integrations
+- ✓ **Phase 4a**: LangChain4j integration (COMPLETE)
+- **Phase 4b**: Quarkus and A2A bridge integrations
 
 ## Testing (`jamjet-spring-boot-starter-test`)
 
@@ -154,6 +155,43 @@ spring.jamjet.observability.opentelemetry=true
 ```
 
 Span hierarchy: `jamjet.execution` → `jamjet.node.{id}` → `jamjet.tool.{name}`
+
+## LangChain4j Integration (`langchain4j-jamjet`)
+
+Add to your dependencies:
+
+```xml
+<dependency>
+    <groupId>dev.jamjet</groupId>
+    <artifactId>langchain4j-jamjet</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+</dependency>
+```
+
+**Durable agents** — wrap any AiServices proxy:
+
+```java
+var client = new JamjetConfig()
+    .runtimeUrl("http://localhost:7700")
+    .buildClient();
+
+MyAssistant raw = AiServices.builder(MyAssistant.class)
+    .chatLanguageModel(model).tools(tools).build();
+
+MyAssistant durable = JamjetDurableAgent.wrap(raw, MyAssistant.class, client);
+// Every call is now tracked, audited, crash-recoverable
+```
+
+**Event-sourced chat memory:**
+
+```java
+var store = new JamjetChatMemoryStore(client);
+var memory = MessageWindowChatMemory.builder()
+    .chatMemoryStore(store)
+    .id("session-1")
+    .maxMessages(20)
+    .build();
+```
 
 ## License
 

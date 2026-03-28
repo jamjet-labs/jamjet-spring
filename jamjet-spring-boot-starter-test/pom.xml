@@ -21,6 +21,12 @@
             <artifactId>jamjet-spring-boot-autoconfigure</artifactId>
         </dependency>
 
+        <!-- Spring Test (DynamicPropertyRegistry etc.) -->
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-test</artifactId>
+        </dependency>
+
         <!-- JUnit 5 -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>

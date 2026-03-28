@@ -23,7 +23,7 @@ public class JamjetReplayExtension
     public void beforeAll(ExtensionContext context) {
         var withRuntime = context.getRequiredTestClass().getAnnotation(WithJamjetRuntime.class);
         if (withRuntime != null) {
-            var container = new JamjetTestContainer(withRuntime.tag());
+            var container = new JamjetTestContainer(withRuntime.image(), withRuntime.tag());
             container.start();
             log.info("Started JamJet test container at {}", container.getRuntimeUrl());
 

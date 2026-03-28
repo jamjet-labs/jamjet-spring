@@ -11,11 +11,15 @@ public class JamjetTestContainer extends GenericContainer<JamjetTestContainer> {
     public static final int PORT = 7700;
 
     public JamjetTestContainer() {
-        this(DEFAULT_TAG);
+        this(IMAGE, DEFAULT_TAG);
     }
 
     public JamjetTestContainer(String tag) {
-        super(IMAGE + ":" + tag);
+        this(IMAGE, tag);
+    }
+
+    public JamjetTestContainer(String image, String tag) {
+        super(image + ":" + tag);
         withExposedPorts(PORT);
         waitingFor(Wait.forHttp("/health")
                 .forStatusCode(200)

@@ -31,7 +31,7 @@ public class JamjetOtelBridge {
 
     public Span startNodeSpan(Span parent, String nodeId, String nodeKind) {
         return tracer.spanBuilder(prefix + ".node." + nodeId)
-                .setParent(io.opentelemetry.context.Context.current().with(parent))
+                .setParent(io.opentelemetry.context.Context.root().with(parent))
                 .setSpanKind(SpanKind.INTERNAL)
                 .setAttribute("jamjet.node.id", nodeId)
                 .setAttribute("jamjet.node.kind", nodeKind)
@@ -40,7 +40,7 @@ public class JamjetOtelBridge {
 
     public Span startToolSpan(Span parent, String toolName) {
         return tracer.spanBuilder(prefix + ".tool." + toolName)
-                .setParent(io.opentelemetry.context.Context.current().with(parent))
+                .setParent(io.opentelemetry.context.Context.root().with(parent))
                 .setSpanKind(SpanKind.CLIENT)
                 .setAttribute("jamjet.tool.name", toolName)
                 .startSpan();
@@ -48,7 +48,7 @@ public class JamjetOtelBridge {
 
     public Span startModelSpan(Span parent, String modelName) {
         return tracer.spanBuilder(prefix + ".model.call")
-                .setParent(io.opentelemetry.context.Context.current().with(parent))
+                .setParent(io.opentelemetry.context.Context.root().with(parent))
                 .setSpanKind(SpanKind.CLIENT)
                 .setAttribute("jamjet.model.name", modelName)
                 .startSpan();
@@ -63,7 +63,8 @@ public class JamjetOtelBridge {
     }
 
     public void endSpanWithError(Span span, Throwable error) {
-        span.setStatus(StatusCode.ERROR, error.getMessage());
+        String message = error.getMessage() != null ? error.getMessage() : error.getClass().getSimpleName();
+        span.setStatus(StatusCode.ERROR, message);
         span.recordException(error);
         span.end();
     }

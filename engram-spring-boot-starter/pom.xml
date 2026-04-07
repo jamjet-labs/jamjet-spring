@@ -10,14 +10,15 @@
         <version>0.1.1</version>
     </parent>
 
-    <artifactId>jamjet-spring-boot-starter</artifactId>
-    <name>JamJet Spring Boot Starter</name>
-    <description>Starter for JamJet durable execution with Spring AI — add one dependency, your agents become durable</description>
+    <artifactId>engram-spring-boot-starter</artifactId>
+    <name>Engram Spring Boot Starter</name>
+    <description>Starter for Engram — add one dependency, your Spring Boot AI agents get durable memory with fact extraction, hybrid retrieval, and consolidation</description>
 
     <dependencies>
         <dependency>
             <groupId>dev.jamjet</groupId>
-            <artifactId>jamjet-spring-boot-autoconfigure</artifactId>
+            <artifactId>engram-spring-boot-autoconfigure</artifactId>
+            <version>${project.version}</version>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>

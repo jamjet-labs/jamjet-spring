@@ -6,7 +6,7 @@
 
     <groupId>dev.jamjet</groupId>
     <artifactId>jamjet-spring-boot-parent</artifactId>
-    <version>0.1.1</version>
+    <version>0.1.2</version>
     <packaging>pom</packaging>
 
     <name>JamJet Spring Boot Parent</name>
@@ -49,6 +49,7 @@
         <module>langchain4j-jamjet</module>
         <module>engram-spring-boot-autoconfigure</module>
         <module>engram-spring-boot-starter</module>
+        <module>engram-spring-boot-starter-example</module>
     </modules>
 
     <properties>

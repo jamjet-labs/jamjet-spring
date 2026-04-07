@@ -7,7 +7,7 @@
     <parent>
         <groupId>dev.jamjet</groupId>
         <artifactId>jamjet-spring-boot-parent</artifactId>
-        <version>0.1.1</version>
+        <version>0.1.2</version>
     </parent>
 
     <artifactId>engram-spring-boot-autoconfigure</artifactId>
@@ -31,6 +31,13 @@
             <groupId>dev.jamjet</groupId>
             <artifactId>jamjet-sdk</artifactId>
             <version>0.4.3</version>
+        </dependency>
+
+        <!-- Spring AI (optional — only needed for EngramContextAdvisor) -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-client-chat</artifactId>
+            <optional>true</optional>
         </dependency>
 
         <!-- Spring Boot Actuator (optional — for health indicator) -->

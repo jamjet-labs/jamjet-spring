@@ -1,2 +1,3 @@
 dev.jamjet.engram.spring.EngramAutoConfiguration
 dev.jamjet.engram.spring.EngramHealthConfiguration
+dev.jamjet.engram.spring.EngramSpringAiConfiguration

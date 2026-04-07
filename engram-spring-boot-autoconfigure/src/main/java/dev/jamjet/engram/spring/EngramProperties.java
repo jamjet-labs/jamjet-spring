@@ -59,6 +59,11 @@ public class EngramProperties {
      */
     private final Health health = new Health();
 
+    /**
+     * Spring AI integration configuration.
+     */
+    private final SpringAi springAi = new SpringAi();
+
     public boolean isEnabled() {
         return enabled;
     }
@@ -109,6 +114,30 @@ public class EngramProperties {
 
     public Health getHealth() {
         return health;
+    }
+
+    public SpringAi getSpringAi() {
+        return springAi;
+    }
+
+    public static class SpringAi {
+
+        /**
+         * When {@code true} (default), Engram auto-registers a
+         * {@code ChatClientCustomizer} that attaches the
+         * {@link EngramContextAdvisor} to every ChatClient built via
+         * Spring's default builder. Set to {@code false} to wire the
+         * advisor manually.
+         */
+        private boolean autoWire = true;
+
+        public boolean isAutoWire() {
+            return autoWire;
+        }
+
+        public void setAutoWire(boolean autoWire) {
+            this.autoWire = autoWire;
+        }
     }
 
     public static class Health {

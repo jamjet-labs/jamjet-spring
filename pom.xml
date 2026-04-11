@@ -6,7 +6,7 @@
 
     <groupId>dev.jamjet</groupId>
     <artifactId>jamjet-spring-boot-parent</artifactId>
-    <version>0.1.2</version>
+    <version>0.2.0</version>
     <packaging>pom</packaging>
 
     <name>JamJet Spring Boot Parent</name>

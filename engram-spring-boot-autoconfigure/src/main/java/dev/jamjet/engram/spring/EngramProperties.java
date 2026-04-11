@@ -138,6 +138,22 @@ public class EngramProperties {
         public void setAutoWire(boolean autoWire) {
             this.autoWire = autoWire;
         }
+
+        /**
+         * When {@code true} (default), Engram auto-registers a
+         * {@link EngramChatMemoryRepository} as the
+         * {@link org.springframework.ai.chat.memory.ChatMemoryRepository} bean.
+         * Set to {@code false} to provide your own implementation.
+         */
+        private boolean chatMemoryRepository = true;
+
+        public boolean isChatMemoryRepository() {
+            return chatMemoryRepository;
+        }
+
+        public void setChatMemoryRepository(boolean chatMemoryRepository) {
+            this.chatMemoryRepository = chatMemoryRepository;
+        }
     }
 
     public static class Health {

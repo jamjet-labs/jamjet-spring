@@ -5,6 +5,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.ChatClientCustomizer;
+import org.springframework.ai.chat.memory.ChatMemoryRepository;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
@@ -46,5 +47,16 @@ public class EngramSpringAiConfiguration {
     public ChatClientCustomizer engramChatClientCustomizer(
             EngramContextAdvisor advisor) {
         return builder -> builder.defaultAdvisors(advisor);
+    }
+
+    @Bean
+    @ConditionalOnClass(ChatMemoryRepository.class)
+    @ConditionalOnMissingBean(ChatMemoryRepository.class)
+    @ConditionalOnProperty(prefix = "engram.spring-ai", name = "chat-memory-repository",
+                           havingValue = "true", matchIfMissing = true)
+    public EngramChatMemoryRepository engramChatMemoryRepository(
+            EngramClient client, EngramProperties properties) {
+        log.info("Registering Engram ChatMemoryRepository for Spring AI");
+        return new EngramChatMemoryRepository(client, properties);
     }
 }

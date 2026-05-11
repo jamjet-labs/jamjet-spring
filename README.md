@@ -1,5 +1,10 @@
 # jamjet-spring-boot-starter
 
+> **Heads up:** active development of this Spring Boot starter is moving
+> under [`jamjet-runtime-java/modules/spring-boot-starter`](https://github.com/jamjet-labs/jamjet-runtime-java) in the next JVM runtime release.
+> **Maven coordinates remain unchanged** — `dev.jamjet:jamjet-spring-boot-starter`.
+> This repo will receive a redirect README and be archived after the next JVM release confirms a clean Maven publish from the new path.
+
 Spring Boot starter for [JamJet](https://jamjet.dev) — add one dependency, your Spring AI agents become durable.
 
 **Crash recovery, event sourcing, and execution tracking for any Spring AI application.**

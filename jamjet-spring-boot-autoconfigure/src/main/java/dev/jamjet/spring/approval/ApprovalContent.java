@@ -1,79 +1,274 @@
 package dev.jamjet.spring.approval;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.ToolResponseMessage;
+import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.content.Media;
+import org.springframework.ai.content.MediaContent;
+import org.springframework.ai.model.tool.ToolCallingChatOptions;
+import org.springframework.ai.tool.ToolCallback;
 
-import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HexFormat;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.TreeSet;
 
 /**
- * What a reviewer approves: a digest binding the decision to the exact prompt,
- * and a bounded, escaped preview to show.
+ * What a reviewer approves: a digest binding the decision to everything the
+ * model receives in the request, and a bounded, escaped preview to show.
+ *
+ * <p>Covered: every message's role and text, its media (MIME type and a SHA-256
+ * of the bytes, or the URL), an assistant message's tool calls, a tool message's
+ * responses, and the options (model, sampling settings, tool names and tool
+ * definitions). Not covered: the tool calls Spring AI makes inside the model call
+ * after approval; those are not individually reviewed here.
  */
 public final class ApprovalContent {
 
-    /** Longest preview shown in {@code /pending}, in characters. */
+    /** Longest preview shown in {@code /pending}, in characters, before the truncation marker. */
     public static final int PREVIEW_LIMIT = 2000;
+
+    private static final String TRUNCATED = " [truncated]";
+
+    private static final ObjectMapper CANONICAL = new ObjectMapper()
+            .configure(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS, true);
 
     private ApprovalContent() {}
 
-    /**
-     * SHA-256 (hex) over every message of the prompt, in order, each as its role
-     * and its text, length-prefixed so no two different prompts encode the same.
-     */
+    /** SHA-256 (hex) of the canonical JSON of {@link #canonical(Prompt)}. */
     public static String digest(Prompt prompt) {
         try {
-            var sha = MessageDigest.getInstance("SHA-256");
-            if (prompt != null) {
-                for (Message m : prompt.getInstructions()) {
-                    update(sha, m.getMessageType().getValue());
-                    update(sha, m.getText() == null ? "" : m.getText());
-                }
-            }
-            return HexFormat.of().formatHex(sha.digest());
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException(e);
+            byte[] json = CANONICAL.writeValueAsBytes(canonical(prompt));
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(json));
+        } catch (JsonProcessingException | NoSuchAlgorithmException e) {
+            throw new IllegalStateException("could not digest the prompt", e);
         }
     }
 
-    private static void update(MessageDigest sha, String part) {
-        byte[] bytes = part.getBytes(StandardCharsets.UTF_8);
-        sha.update((bytes.length + ":").getBytes(StandardCharsets.UTF_8));
-        sha.update(bytes);
+    /** Everything the model receives in this request, as plain data. */
+    static Map<String, Object> canonical(Prompt prompt) {
+        var out = new LinkedHashMap<String, Object>();
+        var messages = new ArrayList<Map<String, Object>>();
+        if (prompt != null) {
+            for (Message m : prompt.getInstructions()) {
+                messages.add(message(m));
+            }
+            out.put("options", options(prompt.getOptions()));
+        }
+        out.put("messages", messages);
+        return out;
+    }
+
+    private static Map<String, Object> message(Message m) {
+        var out = new LinkedHashMap<String, Object>();
+        out.put("role", m.getMessageType().getValue());
+        out.put("text", m.getText() == null ? "" : m.getText());
+        if (m instanceof MediaContent mc && mc.getMedia() != null && !mc.getMedia().isEmpty()) {
+            var media = new ArrayList<Map<String, Object>>();
+            for (Media item : mc.getMedia()) {
+                media.add(media(item));
+            }
+            out.put("media", media);
+        }
+        if (m instanceof AssistantMessage am && am.getToolCalls() != null && !am.getToolCalls().isEmpty()) {
+            var calls = new ArrayList<Map<String, Object>>();
+            for (var call : am.getToolCalls()) {
+                var c = new LinkedHashMap<String, Object>();
+                c.put("id", call.id());
+                c.put("type", call.type());
+                c.put("name", call.name());
+                c.put("arguments", call.arguments());
+                calls.add(c);
+            }
+            out.put("tool_calls", calls);
+        }
+        if (m instanceof ToolResponseMessage tm && tm.getResponses() != null) {
+            var responses = new ArrayList<Map<String, Object>>();
+            for (var r : tm.getResponses()) {
+                var c = new LinkedHashMap<String, Object>();
+                c.put("id", r.id());
+                c.put("name", r.name());
+                c.put("response", r.responseData());
+                responses.add(c);
+            }
+            out.put("tool_responses", responses);
+        }
+        return out;
+    }
+
+    private static Map<String, Object> media(Media media) {
+        var out = new LinkedHashMap<String, Object>();
+        out.put("mime_type", media.getMimeType() == null ? null : media.getMimeType().toString());
+        Object data = media.getData();
+        if (data instanceof byte[] bytes) {
+            out.put("sha256", sha256(bytes));
+        } else if (data != null) {
+            out.put("url", data.toString());
+        }
+        return out;
+    }
+
+    private static Map<String, Object> options(ChatOptions options) {
+        var out = new LinkedHashMap<String, Object>();
+        if (options == null) {
+            return out;
+        }
+        out.put("model", options.getModel());
+        out.put("temperature", options.getTemperature());
+        out.put("top_p", options.getTopP());
+        out.put("top_k", options.getTopK());
+        out.put("max_tokens", options.getMaxTokens());
+        out.put("stop_sequences", options.getStopSequences());
+        if (options instanceof ToolCallingChatOptions tools) {
+            out.put("tool_names", tools.getToolNames() == null ? List.of() : new TreeSet<>(tools.getToolNames()));
+            var definitions = new ArrayList<Map<String, Object>>();
+            if (tools.getToolCallbacks() != null) {
+                for (ToolCallback cb : tools.getToolCallbacks()) {
+                    var d = new LinkedHashMap<String, Object>();
+                    d.put("name", cb.getToolDefinition().name());
+                    d.put("description", cb.getToolDefinition().description());
+                    d.put("input_schema", cb.getToolDefinition().inputSchema());
+                    definitions.add(d);
+                }
+            }
+            definitions.sort(Comparator.comparing(d -> String.valueOf(d.get("name"))));
+            out.put("tool_definitions", definitions);
+            out.put("internal_tool_execution", tools.getInternalToolExecutionEnabled());
+        }
+        return out;
     }
 
     /**
-     * The prompt text for a reviewer: control characters, line breaks and
-     * bidirectional overrides escaped (so the text cannot restyle or reorder what
-     * the reviewer sees), cut at {@link #PREVIEW_LIMIT} characters.
+     * The request for a reviewer, one line per message ({@code [role] text}),
+     * with media, tool calls, tool responses and offered tools. Control, line,
+     * zero-width, bidirectional and tag characters are escaped, so the text
+     * cannot hide or reorder what the reviewer sees. Cut on a character boundary
+     * at {@link #PREVIEW_LIMIT}, with {@code " [truncated]"} only when something
+     * was cut.
      */
     public static String preview(Prompt prompt) {
-        String text = prompt == null || prompt.getContents() == null ? "" : prompt.getContents();
-        var out = new StringBuilder();
-        for (int i = 0; i < text.length() && out.length() < PREVIEW_LIMIT; i++) {
-            char c = text.charAt(i);
-            switch (c) {
+        var lines = new ArrayList<String>();
+        if (prompt != null) {
+            for (Message m : prompt.getInstructions()) {
+                String role = m.getMessageType().getValue();
+                lines.add("[" + role + "] " + escape(m.getText() == null ? "" : m.getText()));
+                if (m instanceof MediaContent mc && mc.getMedia() != null) {
+                    for (Media item : mc.getMedia()) {
+                        var md = media(item);
+                        lines.add("[" + role + " media] " + md.get("mime_type") + " "
+                                + (md.containsKey("sha256") ? "sha256:" + md.get("sha256") : escape(String.valueOf(md.get("url")))));
+                    }
+                }
+                if (m instanceof AssistantMessage am && am.getToolCalls() != null) {
+                    for (var call : am.getToolCalls()) {
+                        lines.add("[assistant tool call] " + escape(call.name()) + " " + escape(call.arguments()));
+                    }
+                }
+                if (m instanceof ToolResponseMessage tm && tm.getResponses() != null) {
+                    for (var r : tm.getResponses()) {
+                        lines.add("[tool response] " + escape(r.name()) + " " + escape(r.responseData()));
+                    }
+                }
+            }
+            if (prompt.getOptions() instanceof ToolCallingChatOptions tools) {
+                var names = new TreeSet<String>();
+                if (tools.getToolNames() != null) {
+                    names.addAll(tools.getToolNames());
+                }
+                if (tools.getToolCallbacks() != null) {
+                    tools.getToolCallbacks().forEach(cb -> names.add(cb.getToolDefinition().name()));
+                }
+                if (!names.isEmpty()) {
+                    lines.add("[tools] " + escape(String.join(", ", names)));
+                }
+            }
+        }
+        return bounded(String.join("\n", lines));
+    }
+
+    /** Cut at a code point (and so escape-sequence) boundary of the already escaped text. */
+    private static String bounded(String text) {
+        if (text.length() <= PREVIEW_LIMIT) {
+            return text;
+        }
+        int end = PREVIEW_LIMIT;
+        if (Character.isLowSurrogate(text.charAt(end)) && Character.isHighSurrogate(text.charAt(end - 1))) {
+            end--;
+        }
+        // Never end inside an escape such as ​ or \U000e0041.
+        int backslash = text.lastIndexOf('\\', end - 1);
+        if (backslash >= 0 && backslash >= end - 10) {
+            int escapeEnd = escapeEnd(text, backslash);
+            if (escapeEnd > end) {
+                end = backslash;
+            }
+        }
+        return text.substring(0, end) + TRUNCATED;
+    }
+
+    private static int escapeEnd(String text, int backslash) {
+        if (backslash + 1 >= text.length()) {
+            return backslash + 1;
+        }
+        return switch (text.charAt(backslash + 1)) {
+            case 'u' -> backslash + 6;
+            case 'U' -> backslash + 10;
+            default -> backslash + 2;
+        };
+    }
+
+    static String escape(String text) {
+        if (text == null) {
+            return "";
+        }
+        var out = new StringBuilder(text.length());
+        text.codePoints().forEach(cp -> {
+            switch (cp) {
                 case '\n' -> out.append("\\n");
                 case '\r' -> out.append("\\r");
                 case '\t' -> out.append("\\t");
                 case '\\' -> out.append("\\\\");
                 default -> {
-                    if (c < 0x20 || (c >= 0x7f && c <= 0x9f) || (c >= 0x202a && c <= 0x202e)
-                            || (c >= 0x2066 && c <= 0x2069) || c == 0x2028 || c == 0x2029 || c == 0x200e
-                            || c == 0x200f || c == 0x061c) {
-                        out.append(String.format("\\u%04x", (int) c));
+                    if (hidden(cp)) {
+                        if (cp > 0xFFFF) {
+                            out.append(String.format("\\U%08x", cp));
+                        } else {
+                            out.append(String.format("\\u%04x", cp));
+                        }
                     } else {
-                        out.append(c);
+                        out.appendCodePoint(cp);
                     }
                 }
             }
-        }
-        if (out.length() >= PREVIEW_LIMIT && text.length() > 0) {
-            out.setLength(Math.min(out.length(), PREVIEW_LIMIT));
-            out.append(" [truncated]");
-        }
+        });
         return out.toString();
+    }
+
+    /** Characters that are invisible, reorder text, or move the terminal cursor. */
+    private static boolean hidden(int cp) {
+        return cp < 0x20 || (cp >= 0x7f && cp <= 0x9f)
+                || (cp >= 0x200b && cp <= 0x200f)       // zero-width space/joiners, LRM/RLM
+                || (cp >= 0x202a && cp <= 0x202e)       // bidi embeddings and overrides
+                || (cp >= 0x2060 && cp <= 0x2069)       // word joiner, invisible operators, bidi isolates
+                || cp == 0x2028 || cp == 0x2029 || cp == 0x061c || cp == 0xfeff
+                || (cp >= 0xe0000 && cp <= 0xe007f);    // tag characters
+    }
+
+    private static String sha256(byte[] bytes) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
     }
 }

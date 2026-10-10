@@ -199,7 +199,7 @@ class RuntimeContractIT {
 
         // The reviewer is the authenticated principal (Spring Security in a real app).
         // The reviewer echoes the digest of the prompt they were shown.
-        assertThat(listed.get(0)).containsEntry("prompt", "send the wire");
+        assertThat(listed.get(0)).containsEntry("prompt", "[user] send the wire");
         String digest = (String) listed.get(0).get("content_digest");
         var resp = controller.handleApproval(executionId, ReviewDecision.approved(digest, "checked"), approver("alice"));
 

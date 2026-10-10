@@ -1,6 +1,7 @@
 package dev.jamjet.spring.test.annotations;
 
 import dev.jamjet.spring.test.JamjetReplayExtension;
+import dev.jamjet.spring.test.JamjetTestContainer;
 import org.junit.jupiter.api.extension.ExtendWith;
 
 import java.lang.annotation.ElementType;
@@ -12,6 +13,6 @@ import java.lang.annotation.Target;
 @Retention(RetentionPolicy.RUNTIME)
 @ExtendWith(JamjetReplayExtension.class)
 public @interface WithJamjetRuntime {
-    String image() default "ghcr.io/jamjet-labs/jamjet";
-    String tag() default "0.3.1";
+    String image() default JamjetTestContainer.IMAGE;
+    String tag() default JamjetTestContainer.DEFAULT_TAG;
 }

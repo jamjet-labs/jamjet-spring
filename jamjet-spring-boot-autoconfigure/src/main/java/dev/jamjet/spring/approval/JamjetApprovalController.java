@@ -172,7 +172,13 @@ public class JamjetApprovalController {
      * reviewer runs with their own runtime token to decide it.
      */
     @GetMapping("/pending")
-    public ResponseEntity<List<Map<String, Object>>> listPending() {
+    public ResponseEntity<Object> listPending(Principal principal) {
+        // The list shows prompts, initiators and runtime request context: the same
+        // reviewer rules as a decision apply.
+        var reviewer = Reviewers.check(principal, policy);
+        if (!reviewer.accepted()) {
+            return ResponseEntity.status(reviewer.status()).body(Map.of("error", reviewer.reason()));
+        }
         var out = new ArrayList<Map<String, Object>>();
         for (var waiting : waitRegistry.allPending()) {
             var item = new LinkedHashMap<String, Object>();

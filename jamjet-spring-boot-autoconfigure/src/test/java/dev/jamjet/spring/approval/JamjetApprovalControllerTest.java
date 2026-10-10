@@ -193,7 +193,7 @@ class JamjetApprovalControllerTest {
                 """);
         var call = parkedCall(null);
 
-        var listed = controller.listPending().getBody();
+        var listed = pending(controller, BOB);
 
         assertThat(listed).singleElement().satisfies(item -> {
             assertThat(item).containsEntry("execution_id", "exec_1");
@@ -235,10 +235,15 @@ class JamjetApprovalControllerTest {
         runtime.on("GET", APPROVALS, 200, "{\"pending\":[],\"decided\":[]}");
         var call = parkedCall(null);
 
-        var item = controller.listPending().getBody().get(0);
+        var item = pending(controller, BOB).get(0);
 
         assertThat(item).containsEntry("prompt", "send 100 to acct 42").containsEntry("content_digest", DIGEST);
         registry.complete("exec_1", ApprovalDecision.rejected("t", "cleanup"));
         call.get(2, TimeUnit.SECONDS);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> pending(JamjetApprovalController c, Principal p) {
+        return (List<Map<String, Object>>) c.listPending(p).getBody();
     }
 }

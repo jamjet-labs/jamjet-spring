@@ -181,7 +181,7 @@ class RuntimeContractIT {
             assertThat(System.nanoTime()).as("the call pauses for approval").isLessThan(deadline);
             Thread.sleep(20);
         }
-        var listed = controller.listPending().getBody();
+        var listed = pending(controller);
         assertThat(listed).hasSize(1);
         String executionId = (String) listed.get(0).get("execution_id");
         assertThat(listed.get(0)).doesNotContainKeys("runtime_error", "runtime_requests");
@@ -254,7 +254,7 @@ class RuntimeContractIT {
             Thread.sleep(10);
         }
 
-        var item = controller.listPending().getBody().get(0);
+        var item = pending(controller).get(0);
         @SuppressWarnings("unchecked")
         var requests = (List<Map<String, Object>>) item.get("runtime_requests");
         assertThat(requests).singleElement().satisfies(r -> {
@@ -355,5 +355,11 @@ class RuntimeContractIT {
             Thread.sleep(50);
         }
         return true;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> pending(JamjetApprovalController c) {
+        // In a real application the reviewer is the request's Spring Security principal.
+        return (List<Map<String, Object>>) c.listPending(() -> "reviewer").getBody();
     }
 }

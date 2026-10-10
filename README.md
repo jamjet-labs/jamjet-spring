@@ -7,7 +7,7 @@
 
 Spring Boot starter for [JamJet](https://jamjet.dev). Add one dependency and every call through a `ChatClient` built from the auto-configured `ChatClient.Builder` is recorded on the JamJet runtime as an execution with an event log, with optional human approval before the model is called.
 
-> **Upgrading from 0.1.0:** 0.1.0 called `/api/v1/...` routes the runtime never served. The runtime answered them with its web UI (`200 text/html`), the advisors logged a warning and carried on, and nothing was recorded. 0.2.0 calls the runtime's real routes and refuses calls it cannot record (see [When the runtime is unavailable](#when-the-runtime-is-unavailable)).
+> **Upgrading from 0.1.0:** 0.1.0 called `/api/v1/...` routes the runtime never served. The runtime answered them with its web UI (`200 text/html`), the advisors logged a warning and carried on, and nothing was recorded. 0.2.0 calls the runtime's real routes and refuses calls it cannot record (see [When the runtime is unavailable](#when-the-runtime-is-unavailable)). LangChain4j chat memory is now keyed by a namespace (see [LangChain4j Integration](#langchain4j-integration-langchain4j-jamjet)), so memory written by a pre-release 0.2.0 build without one is not found and conversations start empty. Those executions stay on the runtime; read their `chat_memory` events with `GET /executions/{id}/events` if you need to carry history over.
 
 ## Quickstart
 
@@ -145,10 +145,12 @@ SecurityFilterChain approvals(HttpSecurity http) throws Exception {
             .securityMatcher("/jamjet/approvals/**")
             .authorizeHttpRequests(a -> a.anyRequest().hasRole("JAMJET_APPROVER"))
             .httpBasic(Customizer.withDefaults())
-            .csrf(csrf -> csrf.disable()) // or send the CSRF token with each POST
+            .csrf(csrf -> csrf.disable()) // see the note below
             .build();
 }
 ```
+
+Turning CSRF off is acceptable here only because the decision endpoint accepts `application/json` bodies only, so a cross-site form post is refused (415) even though browsers resend cached Basic credentials. If reviewers sign in with a session or form login, keep CSRF on and send the token with each POST.
 
 For local development without Spring Security, `spring.jamjet.approval.controller.allow-unauthenticated=true` registers the endpoints anyway, logs a warning at startup, and records decisions with approver `unauthenticated`. Anyone who can reach the application can then approve its calls.
 
@@ -156,7 +158,7 @@ For local development without Spring Security, `spring.jamjet.approval.controlle
 
 A decision is appended to the call's execution as a `spring_ai.approval_decision` event (approver, whether authenticated, the initiator when known, comment) before the call is released. If it cannot be recorded, the endpoint answers with the runtime's status (or 502) and message, and the waiting call is released as rejected. Only `"approved"` lets a call through. A call that times out is always rejected (`default-decision` is deprecated; any value other than `rejected` fails at startup). If a decision is recorded but the call stopped waiting before it could be delivered, the endpoint answers 409 and appends a `spring_ai.approval_decision_void` event, so the record never claims a decision that did not apply.
 
-A call marked as requiring approval never runs ungated: `JamjetApprovalGuard` is auto-configured on its own, independently of `durability-enabled` and `approval.enabled`, and refuses the call before the model runs when no approval advisor is on the ChatClient. A call whose execution could not be started (the runtime failed open) is rejected by the approval advisor.
+On a `ChatClient` built from the auto-configured `ChatClient.Builder`, a call marked as requiring approval never runs ungated: `JamjetApprovalGuard` is auto-configured on its own, independently of `durability-enabled` and `approval.enabled`, and refuses the call before the model runs when no approval advisor is on the client. A client built any other way (`ChatClient.create(model)`, `ChatClient.builder(model)`, your own `ChatClient.Builder` bean, or with `spring.ai.chat.client.enabled=false`) gets no guard, and the marker does nothing there; add `JamjetApprovalGuard` and `JamjetApprovalAdvisor` to it yourself. A call whose execution could not be started (the runtime failed open) is rejected by the approval advisor.
 
 ## Configuration
 

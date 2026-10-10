@@ -135,15 +135,18 @@ public class JamjetApprovalController {
         // From here the call is claimed: every exit must release it.
         try {
             return decideClaimed(executionId, decision, approver, authenticated, waiting);
-        } catch (RuntimeException unexpected) {
+        } catch (RuntimeException | Error unexpected) {
             log.error("Unexpected failure deciding execution {}; rejecting the call", executionId, unexpected);
             waitRegistry.complete(executionId, ApprovalDecision.rejected("jamjet",
                     "the decision could not be processed: " + unexpected.getMessage()));
             try {
                 voidDecision(executionId, approver, decision.decision(),
                         "the decision could not be processed and the call was rejected: " + unexpected.getMessage());
-            } catch (RuntimeException ignored) {
+            } catch (RuntimeException | Error ignored) {
                 // already logged above; the call is released either way
+            }
+            if (unexpected instanceof Error error) {
+                throw error;
             }
             return error(HttpStatus.INTERNAL_SERVER_ERROR, executionId,
                     "the decision could not be processed; the call was rejected", null);

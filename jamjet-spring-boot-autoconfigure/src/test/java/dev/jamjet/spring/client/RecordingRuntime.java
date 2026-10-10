@@ -33,7 +33,7 @@ public final class RecordingRuntime implements AutoCloseable {
         }
     }
 
-    private record Canned(int status, String contentType, String body) {}
+    private record Canned(int status, String contentType, String body, long delayMillis) {}
 
     private final HttpServer server;
     private final List<Request> requests = Collections.synchronizedList(new ArrayList<>());
@@ -53,7 +53,14 @@ public final class RecordingRuntime implements AutoCloseable {
             requests.add(new Request(exchange.getRequestMethod(), full, body,
                     Map.copyOf(exchange.getRequestHeaders())));
             Canned canned = routes.getOrDefault(exchange.getRequestMethod() + " " + full,
-                    new Canned(200, "text/html", "<!doctype html><title>jamjet</title>"));
+                    new Canned(200, "text/html", "<!doctype html><title>jamjet</title>", 0));
+            if (canned.delayMillis() > 0) {
+                try {
+                    Thread.sleep(canned.delayMillis());
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
             byte[] bytes = canned.body().getBytes(StandardCharsets.UTF_8);
             exchange.getResponseHeaders().add("Content-Type", canned.contentType());
             exchange.sendResponseHeaders(canned.status(), bytes.length == 0 ? -1 : bytes.length);
@@ -62,12 +69,19 @@ public final class RecordingRuntime implements AutoCloseable {
             }
             exchange.close();
         });
+        server.setExecutor(java.util.concurrent.Executors.newCachedThreadPool());
         server.start();
     }
 
     /** Answer {@code method path} with {@code status} and a JSON body. */
     public RecordingRuntime on(String method, String path, int status, String json) {
-        routes.put(method + " " + path, new Canned(status, "application/json", json));
+        routes.put(method + " " + path, new Canned(status, "application/json", json, 0));
+        return this;
+    }
+
+    /** As {@link #on}, answering only after {@code delayMillis}. */
+    public RecordingRuntime onSlow(String method, String path, int status, String json, long delayMillis) {
+        routes.put(method + " " + path, new Canned(status, "application/json", json, delayMillis));
         return this;
     }
 

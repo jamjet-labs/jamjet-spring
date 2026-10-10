@@ -11,6 +11,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Registry of ChatClient calls paused for approval. The advisor blocks on
@@ -28,7 +29,16 @@ public class ApprovalWaitRegistry {
         public static final WaitContext NONE = new WaitContext(null);
     }
 
-    private record Waiter(CompletableFuture<ApprovalDecision> decision, Instant since, WaitContext context) {}
+    private enum State { WAITING, DECIDING, TIMED_OUT }
+
+    private record Waiter(CompletableFuture<ApprovalDecision> decision, Instant since, WaitContext context,
+                          AtomicReference<State> state) {}
+
+    /**
+     * How long a call whose timeout fired keeps waiting for a decision that was
+     * already being recorded when it fired, so the record and the call agree.
+     */
+    static final Duration DECIDING_GRACE = Duration.ofMinutes(2);
 
     private final ConcurrentHashMap<String, Waiter> pending = new ConcurrentHashMap<>();
 
@@ -46,16 +56,39 @@ public class ApprovalWaitRegistry {
             throws TimeoutException, InterruptedException {
         var waiter = pending.computeIfAbsent(executionId,
                 k -> new Waiter(new CompletableFuture<>(), Instant.now(),
-                        context == null ? WaitContext.NONE : context));
+                        context == null ? WaitContext.NONE : context, new AtomicReference<>(State.WAITING)));
         try {
             return waiter.decision().get(timeout.toMillis(), TimeUnit.MILLISECONDS);
         } catch (TimeoutException e) {
-            throw new TimeoutException("Approval timed out for execution " + executionId);
+            if (waiter.state().compareAndSet(State.WAITING, State.TIMED_OUT)) {
+                throw new TimeoutException("Approval timed out for execution " + executionId);
+            }
+            // A decision claimed the call before the timeout fired and is being
+            // recorded: apply it rather than contradict what the runtime records.
+            try {
+                return waiter.decision().get(DECIDING_GRACE.toMillis(), TimeUnit.MILLISECONDS);
+            } catch (TimeoutException late) {
+                throw new TimeoutException("Approval timed out for execution " + executionId
+                        + " while a decision was being recorded");
+            } catch (ExecutionException ex) {
+                throw new IllegalStateException("Approval wait failed for execution " + executionId, ex.getCause());
+            }
         } catch (ExecutionException e) {
             throw new IllegalStateException("Approval wait failed for execution " + executionId, e.getCause());
         } finally {
             pending.remove(executionId, waiter);
         }
+    }
+
+    /**
+     * Claim the waiting call for one decision. Exactly one caller wins; a second
+     * decision, or one arriving after the call timed out, gets {@code false}
+     * and must record nothing. A claimed call stays registered until
+     * {@link #complete} releases it.
+     */
+    public boolean claim(String executionId) {
+        var waiter = pending.get(executionId);
+        return waiter != null && waiter.state().compareAndSet(State.WAITING, State.DECIDING);
     }
 
     /**

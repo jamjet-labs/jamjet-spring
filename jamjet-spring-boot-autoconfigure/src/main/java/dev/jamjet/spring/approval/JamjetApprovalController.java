@@ -108,6 +108,12 @@ public class JamjetApprovalController {
                     "separation of duties: " + approver + " triggered this call and cannot approve it", null);
         }
 
+        if (!waitRegistry.claim(executionId)) {
+            return error(HttpStatus.CONFLICT, executionId,
+                    "the call on execution " + executionId + " is already being decided or no longer waiting; "
+                            + "nothing was recorded", null);
+        }
+
         String recordedApprover = approver != null ? approver : UNAUTHENTICATED;
         log.info("Received {} for execution {} from {}", decision.decision(), executionId, recordedApprover);
         try {

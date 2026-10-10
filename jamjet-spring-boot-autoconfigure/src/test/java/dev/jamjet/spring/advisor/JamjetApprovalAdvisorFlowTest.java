@@ -160,4 +160,32 @@ class JamjetApprovalAdvisorFlowTest {
                 .isInstanceOf(ApprovalRejectedException.class);
         assertThat(model.calls).hasValue(0);
     }
+
+    @Test
+    void theCallersPrincipalIsRecordedAsTheInitiator() throws Exception {
+        runtime.on("POST", EVENTS, 200, "{\"execution_id\":\"exec_1\",\"accepted\":true}");
+        var call = CompletableFuture.supplyAsync(() -> {
+            var ctx = org.springframework.security.core.context.SecurityContextHolder.createEmptyContext();
+            ctx.setAuthentication(new org.springframework.security.authentication.UsernamePasswordAuthenticationToken(
+                    "carol", "n/a", java.util.List.of()));
+            org.springframework.security.core.context.SecurityContextHolder.setContext(ctx);
+            try {
+                return chat.prompt("wire 100")
+                        .advisors(a -> a.param(JamjetApprovalAdvisor.REQUIRES_APPROVAL_KEY, true)
+                                .param(JamjetDurabilityAdvisor.EXECUTION_ID_KEY, "exec_1"))
+                        .call().content();
+            } finally {
+                org.springframework.security.core.context.SecurityContextHolder.clearContext();
+            }
+        });
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (!registry.isPending("exec_1")) {
+            assertThat(System.nanoTime()).isLessThan(deadline);
+            Thread.sleep(5);
+        }
+
+        assertThat(registry.context("exec_1").initiator()).isEqualTo("carol");
+        registry.complete("exec_1", ApprovalDecision.approved("dave", null));
+        assertThat(call.get(5, TimeUnit.SECONDS)).isEqualTo("hello");
+    }
 }

@@ -10,6 +10,7 @@ import dev.jamjet.spring.advisor.JamjetAuditAdvisor;
 import dev.jamjet.spring.advisor.JamjetDurabilityAdvisor;
 import dev.jamjet.spring.approval.ApprovalWaitRegistry;
 import dev.jamjet.spring.approval.JamjetApprovalController;
+import dev.jamjet.spring.approval.ReviewDecision;
 import dev.jamjet.spring.client.JamjetRuntimeClient;
 import dev.jamjet.spring.client.model.ApprovalDecision;
 import dev.jamjet.spring.client.model.ExecutionEvent;
@@ -183,9 +184,10 @@ class RuntimeContractIT {
         var listed = controller.listPending().getBody();
         assertThat(listed).hasSize(1);
         String executionId = (String) listed.get(0).get("execution_id");
-        assertThat(listed.get(0)).containsKey("runtime_requests").doesNotContainKey("runtime_error");
+        assertThat(listed.get(0)).doesNotContainKeys("runtime_error", "runtime_requests");
 
-        var resp = controller.handleApproval(executionId, ApprovalDecision.approved("alice", "checked"));
+        // The reviewer is the authenticated principal (Spring Security in a real app).
+        var resp = controller.handleApproval(executionId, ReviewDecision.approved("checked"), () -> "alice");
 
         assertThat(resp.getStatusCode().value()).isEqualTo(200);
         assertThat(resp.getBody()).containsEntry("recorded_as", "external_event")
@@ -196,11 +198,12 @@ class RuntimeContractIT {
         assertThat(externalKeys(events))
                 .containsSubsequence("spring_ai.approval_requested", "spring_ai.approval_decision", "spring_ai.completed");
         assertThat(external(events, "spring_ai.approval_decision").payload())
-                .containsEntry("decision", "approved").containsEntry("user_id", "alice");
+                .containsEntry("decision", "approved").containsEntry("approver", "alice")
+                .containsEntry("authenticated", true);
     }
 
     @Test
-    void aRuntimeHeldApprovalIsListedWithItsDigestAndDecidedThroughTheController() throws Exception {
+    void aRuntimeHeldApprovalIsListedReadOnlyAndDecidedWithTheReviewersOwnToken() throws Exception {
         var props = props();
         var client = new JamjetRuntimeClient(props);
         var registry = new ApprovalWaitRegistry();
@@ -233,9 +236,7 @@ class RuntimeContractIT {
                 "this runtime does not hold agent tool dispatches for approval at claim time "
                         + "(jamjetdev/jamjet 0.5.0 predates it); run against a newer jamjet-server");
 
-        var view = client.listApprovals(executionId);
-        assertThat(view.pending()).hasSize(1);
-        String digest = view.pending().get(0).actionDigest();
+        String digest = client.listApprovals(executionId).pending().get(0).actionDigest();
         assertThat(digest).as("the runtime binds the request to a digest").isNotBlank();
 
         // A call in this application waiting on that execution.
@@ -250,30 +251,28 @@ class RuntimeContractIT {
             Thread.sleep(10);
         }
 
+        var item = controller.listPending().getBody().get(0);
         @SuppressWarnings("unchecked")
-        var requests = (List<Map<String, Object>>) controller.listPending().getBody().get(0).get("runtime_requests");
+        var requests = (List<Map<String, Object>>) item.get("runtime_requests");
         assertThat(requests).singleElement().satisfies(r -> {
-            assertThat(r).containsEntry("node_id", "dispatch");
-            assertThat(r).containsEntry("action_digest", digest);
+            assertThat(r).containsEntry("node_id", "dispatch").containsEntry("action_digest", digest);
+            assertThat((String) r.get("decide_with")).contains("--action-digest " + digest);
         });
 
-        // A refusal comes back with the runtime's own status and message, and
-        // the waiting call is released at once rather than timing out.
-        var refused = controller.handleApproval(executionId,
-                new ApprovalDecision("approved", "no-such-node", "alice", null, digest));
-        assertThat(refused.getStatusCode().value()).isEqualTo(409);
-        assertThat((String) refused.getBody().get("error")).contains("no-such-node");
-        assertThat(waiting.get(5, TimeUnit.SECONDS).isApproved()).isFalse();
+        // Listing never decided anything on the runtime.
+        assertThat(client.listApprovals(executionId).pending()).hasSize(1);
 
-        var approved = controller.handleApproval(executionId,
-                new ApprovalDecision("approved", "dispatch", "alice", "reviewed", digest));
-        assertThat(approved.getStatusCode().value()).isEqualTo(200);
-        assertThat(approved.getBody()).containsEntry("recorded_as", "runtime_approval")
-                .containsEntry("accepted", true).containsEntry("node_id", "dispatch");
+        // The reviewer decides with their own token. In dev mode the runtime has
+        // no tokens and records user_id; with auth on it records the token's
+        // name and ignores user_id. This assertion is the dev-mode form.
+        client.approveExecution(executionId, new ApprovalDecision("approved", "dispatch", "alice", "reviewed", digest));
         var after = client.listApprovals(executionId);
         assertThat(after.pending()).isEmpty();
         assertThat(after.decided()).singleElement()
                 .satisfies(d -> assertThat(d).containsEntry("status", "approved").containsEntry("user_id", "alice"));
+
+        registry.complete(executionId, ApprovalDecision.rejected("it", "cleanup"));
+        waiting.get(5, TimeUnit.SECONDS);
     }
 
     @Test

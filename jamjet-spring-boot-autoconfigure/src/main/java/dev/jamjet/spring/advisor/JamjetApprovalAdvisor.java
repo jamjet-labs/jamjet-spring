@@ -2,6 +2,7 @@ package dev.jamjet.spring.advisor;
 
 import dev.jamjet.spring.JamjetProperties;
 import dev.jamjet.spring.approval.ApprovalWaitRegistry;
+import dev.jamjet.spring.approval.CurrentPrincipal;
 import dev.jamjet.spring.client.JamjetClientException;
 import dev.jamjet.spring.client.JamjetRuntimeClient;
 import dev.jamjet.spring.client.model.ApprovalDecision;
@@ -97,7 +98,10 @@ public class JamjetApprovalAdvisor implements BaseAdvisor {
 
         try {
             Duration timeout = parseTimeout(properties.getApproval().getTimeout());
-            ApprovalDecision decision = waitRegistry.waitForApproval(executionId, timeout);
+            // Who triggered the call, if Spring Security knows: that principal
+            // cannot approve it (separation of duties, enforced by the controller).
+            var context = new ApprovalWaitRegistry.WaitContext(CurrentPrincipal.name());
+            ApprovalDecision decision = waitRegistry.waitForApproval(executionId, timeout, context);
 
             // Only an explicit "approved" lets the call through.
             if (decision == null || !decision.isApproved()) {

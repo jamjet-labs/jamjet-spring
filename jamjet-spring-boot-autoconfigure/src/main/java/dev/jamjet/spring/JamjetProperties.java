@@ -228,6 +228,17 @@ public class JamjetProperties {
         /** What happens on timeout: "approved" or "rejected". */
         private String defaultDecision = "rejected";
 
+        /** The approval REST endpoints ({@code spring.jamjet.approval.controller.*}). */
+        private Controller controller = new Controller();
+
+        public Controller getController() {
+            return controller;
+        }
+
+        public void setController(Controller controller) {
+            this.controller = controller;
+        }
+
         public boolean isEnabled() {
             return enabled;
         }
@@ -258,6 +269,27 @@ public class JamjetProperties {
 
         public void setDefaultDecision(String defaultDecision) {
             this.defaultDecision = defaultDecision;
+        }
+    }
+
+    /**
+     * Approval endpoint configuration ({@code spring.jamjet.approval.controller.*}).
+     */
+    public static class Controller {
+
+        /**
+         * Register the approval endpoints without Spring Security, accepting
+         * unauthenticated decisions. Local development only: anyone who can reach
+         * the application can then approve its calls.
+         */
+        private boolean allowUnauthenticated = false;
+
+        public boolean isAllowUnauthenticated() {
+            return allowUnauthenticated;
+        }
+
+        public void setAllowUnauthenticated(boolean allowUnauthenticated) {
+            this.allowUnauthenticated = allowUnauthenticated;
         }
     }
 

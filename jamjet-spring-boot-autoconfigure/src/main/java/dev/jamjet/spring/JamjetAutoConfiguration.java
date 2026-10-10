@@ -14,6 +14,7 @@ import org.springframework.ai.chat.client.ChatClientCustomizer;
 import org.springframework.ai.chat.client.advisor.api.Advisor;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.boot.autoconfigure.condition.AnyNestedCondition;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
@@ -21,6 +22,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Conditional;
 import org.springframework.context.annotation.Configuration;
 
 import java.util.ArrayList;
@@ -134,14 +136,43 @@ public class JamjetAutoConfiguration {
         return new JamjetApprovalAdvisor(client, properties, waitRegistry);
     }
 
+    /**
+     * The approval endpoints. Registered when Spring Security is on the classpath
+     * (decisions then require an authenticated principal), or when
+     * {@code spring.jamjet.approval.controller.allow-unauthenticated=true}.
+     */
     @Bean
     @ConditionalOnWebApplication
     @ConditionalOnProperty(prefix = "spring.jamjet.approval", name = "enabled",
                            havingValue = "true")
+    @Conditional(ApprovalControllerCondition.class)
     public JamjetApprovalController jamjetApprovalController(
-            JamjetRuntimeClient client, ApprovalWaitRegistry waitRegistry) {
+            JamjetRuntimeClient client, ApprovalWaitRegistry waitRegistry, JamjetProperties properties) {
+        boolean open = properties.getApproval().getController().isAllowUnauthenticated();
+        if (open) {
+            log.warn("JamJet approval endpoints accept UNAUTHENTICATED decisions "
+                    + "(spring.jamjet.approval.controller.allow-unauthenticated=true). Anyone who can reach "
+                    + "/jamjet/approvals can approve this application's calls. Use this for local development only.");
+        }
         log.info("Registering JamJet approval REST controller at /jamjet/approvals");
-        return new JamjetApprovalController(client, waitRegistry);
+        return new JamjetApprovalController(client, waitRegistry, open);
+    }
+
+    /** Spring Security present, or unauthenticated decisions explicitly allowed. */
+    static class ApprovalControllerCondition extends AnyNestedCondition {
+
+        ApprovalControllerCondition() {
+            super(ConfigurationPhase.REGISTER_BEAN);
+        }
+
+        @ConditionalOnClass(name = "org.springframework.security.core.context.SecurityContextHolder")
+        static class SpringSecurityPresent {
+        }
+
+        @ConditionalOnProperty(prefix = "spring.jamjet.approval.controller", name = "allow-unauthenticated",
+                               havingValue = "true")
+        static class UnauthenticatedAllowed {
+        }
     }
 
     // ── Observability ────────────────────────────────────────────────────

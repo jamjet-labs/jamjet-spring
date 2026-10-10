@@ -10,7 +10,10 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.security.Principal;
 import java.time.Duration;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
@@ -20,17 +23,12 @@ class JamjetApprovalControllerTest {
 
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String APPROVALS = "/executions/exec_1/approvals";
-    private static final String APPROVE = "/executions/exec_1/approve";
     private static final String EVENTS = "/executions/exec_1/external-event";
-
-    private static final String RUNTIME_PENDING = """
-            {"pending":[{"node_id":"pay","tool_name":"send_wire","approver":"human","sequence":4,
-              "context":{"action_digest":"d-123"}}],"decided":[]}
-            """;
-    private static final String NOTHING_PENDING = "{\"pending\":[],\"decided\":[]}";
+    private static final Principal BOB = () -> "bob";
 
     private RecordingRuntime runtime;
     private ApprovalWaitRegistry registry;
+    private JamjetRuntimeClient client;
     private JamjetApprovalController controller;
 
     @BeforeEach
@@ -38,8 +36,10 @@ class JamjetApprovalControllerTest {
         runtime = new RecordingRuntime();
         var props = new JamjetProperties();
         props.setRuntimeUrl(runtime.url());
+        props.setApiToken("app-service-token");
+        client = new JamjetRuntimeClient(props);
         registry = new ApprovalWaitRegistry();
-        controller = new JamjetApprovalController(new JamjetRuntimeClient(props), registry);
+        controller = new JamjetApprovalController(client, registry);
     }
 
     @AfterEach
@@ -47,17 +47,18 @@ class JamjetApprovalControllerTest {
         runtime.close();
     }
 
-    /** Park a thread on the local wait, as JamjetApprovalAdvisor does, and wait until it is parked. */
-    private CompletableFuture<ApprovalDecision> parkedCall() throws Exception {
+    /** Park a thread on the local wait, as JamjetApprovalAdvisor does. */
+    private CompletableFuture<ApprovalDecision> parkedCall(String initiator) throws Exception {
         var future = CompletableFuture.supplyAsync(() -> {
             try {
-                return registry.waitForApproval("exec_1", Duration.ofSeconds(30));
+                return registry.waitForApproval("exec_1", Duration.ofSeconds(30),
+                        new ApprovalWaitRegistry.WaitContext(initiator));
             } catch (Exception e) {
                 throw new RuntimeException(e);
             }
         });
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        while (registry.allPending().stream().noneMatch(p -> p.executionId().equals("exec_1"))) {
+        while (!registry.isPending("exec_1")) {
             if (System.nanoTime() > deadline) {
                 throw new AssertionError("waiter never registered");
             }
@@ -66,83 +67,79 @@ class JamjetApprovalControllerTest {
         return future;
     }
 
-    private RecordingRuntime.Request lastPost(String path) {
-        return runtime.requests().stream()
-                .filter(r -> r.method().equals("POST") && r.path().equals(path))
-                .reduce((a, b) -> b)
-                .orElseThrow(() -> new AssertionError("no POST " + path));
+    private JsonNode recordedDecision() throws Exception {
+        var r = runtime.requests().stream().filter(x -> x.method().equals("POST") && x.path().equals(EVENTS))
+                .reduce((a, b) -> b).orElseThrow(() -> new AssertionError("no decision recorded"));
+        return JSON.readTree(r.body());
     }
 
     @Test
-    void aRuntimeRefusalComesBackWithItsStatusAndMessageAndReleasesTheCall() throws Exception {
-        runtime.on("GET", APPROVALS, 200, RUNTIME_PENDING)
-                .on("POST", APPROVE, 409, "{\"error\":\"action_digest does not match the pending request\"}");
-        var call = parkedCall();
+    void noAuthenticatedReviewerIsUnauthorizedAndReleasesNothing() throws Exception {
+        runtime.on("POST", EVENTS, 200, "{\"accepted\":true}");
+        var call = parkedCall(null);
 
-        var resp = controller.handleApproval("exec_1",
-                new ApprovalDecision("approved", "pay", "alice", null, "stale"));
+        var resp = controller.handleApproval("exec_1", ReviewDecision.approved(null), null);
 
-        assertThat(resp.getStatusCode().value()).isEqualTo(409);
-        assertThat(resp.getBody()).containsEntry("error", "action_digest does not match the pending request");
-        // The paused call is released at once, as a rejection, not left to time out.
-        var released = call.get(2, TimeUnit.SECONDS);
-        assertThat(released.isApproved()).isFalse();
-        assertThat(released.comment()).contains("action_digest does not match");
+        assertThat(resp.getStatusCode().value()).isEqualTo(401);
+        assertThat(registry.isPending("exec_1")).isTrue();
+        assertThat(runtime.requests()).isEmpty();
+        registry.complete("exec_1", ApprovalDecision.rejected("t", "cleanup"));
+        call.get(2, TimeUnit.SECONDS);
     }
 
     @Test
-    void anUnreachableRuntimeIsABadGatewayAndStillReleasesTheCall() throws Exception {
-        runtime.on("GET", APPROVALS, 503, "{\"error\":\"backend error: locked\"}");
-        var call = parkedCall();
+    void theApproverIsThePrincipalNeverTheBody() throws Exception {
+        runtime.on("POST", EVENTS, 200, "{\"accepted\":true}");
+        var call = parkedCall(null);
+        // An older client still sends user_id; it must not be what is recorded.
+        var body = JSON.readValue("{\"decision\":\"approved\",\"user_id\":\"alice\",\"comment\":\"ok\"}",
+                ReviewDecision.class);
 
-        var resp = controller.handleApproval("exec_1", ApprovalDecision.approved("alice", null));
-
-        assertThat(resp.getStatusCode().value()).isEqualTo(502);
-        assertThat(resp.getBody()).containsEntry("error", "backend error: locked");
-        assertThat(call.get(2, TimeUnit.SECONDS).isApproved()).isFalse();
-    }
-
-    @Test
-    void forwardsTheReviewedDigestAndNodeToTheRuntime() throws Exception {
-        runtime.on("GET", APPROVALS, 200, RUNTIME_PENDING)
-                .on("POST", APPROVE, 200, "{\"execution_id\":\"exec_1\",\"node_id\":\"pay\",\"accepted\":true}");
-        var call = parkedCall();
-
-        var resp = controller.handleApproval("exec_1",
-                new ApprovalDecision("approved", "pay", "alice", "ok", "d-123"));
+        var resp = controller.handleApproval("exec_1", body, BOB);
 
         assertThat(resp.getStatusCode().value()).isEqualTo(200);
-        assertThat(resp.getBody()).containsEntry("accepted", true).containsEntry("node_id", "pay");
-        JsonNode sent = JSON.readTree(lastPost(APPROVE).body());
-        assertThat(sent.get("action_digest").asText()).isEqualTo("d-123");
-        assertThat(sent.get("node_id").asText()).isEqualTo("pay");
-        assertThat(sent.get("decision").asText()).isEqualTo("approved");
+        var payload = recordedDecision().get("payload");
+        assertThat(payload.get("approver").asText()).isEqualTo("bob");
+        assertThat(payload.get("authenticated").asBoolean()).isTrue();
+        assertThat(payload.toString()).doesNotContain("alice");
         assertThat(call.get(2, TimeUnit.SECONDS).isApproved()).isTrue();
     }
 
     @Test
-    void anApplicationSideApprovalIsRecordedOnTheExecutionBeforeTheCallResumes() throws Exception {
-        runtime.on("GET", APPROVALS, 200, NOTHING_PENDING)
-                .on("POST", EVENTS, 200, "{\"execution_id\":\"exec_1\",\"accepted\":true}");
-        var call = parkedCall();
+    void whoeverTriggeredTheCallCannotApproveIt() throws Exception {
+        runtime.on("POST", EVENTS, 200, "{\"accepted\":true}");
+        var call = parkedCall("bob");
 
-        var resp = controller.handleApproval("exec_1", ApprovalDecision.approved("alice", "fine"));
+        var resp = controller.handleApproval("exec_1", ReviewDecision.approved(null), BOB);
 
-        assertThat(resp.getStatusCode().value()).isEqualTo(200);
-        JsonNode sent = JSON.readTree(lastPost(EVENTS).body());
-        assertThat(sent.get("correlation_key").asText()).isEqualTo("spring_ai.approval_decision");
-        assertThat(sent.get("payload").get("decision").asText()).isEqualTo("approved");
-        assertThat(sent.get("payload").get("user_id").asText()).isEqualTo("alice");
+        assertThat(resp.getStatusCode().value()).isEqualTo(403);
+        assertThat(registry.isPending("exec_1")).isTrue();
+        assertThat(runtime.requests()).isEmpty();
+
+        var other = controller.handleApproval("exec_1", ReviewDecision.approved(null), () -> "carol");
+        assertThat(other.getStatusCode().value()).isEqualTo(200);
+        assertThat(recordedDecision().get("payload").get("initiator").asText()).isEqualTo("bob");
         assertThat(call.get(2, TimeUnit.SECONDS).isApproved()).isTrue();
     }
 
     @Test
-    void anApprovalThatCannotBeRecordedIsRefusedAndTheCallRejected() throws Exception {
-        runtime.on("GET", APPROVALS, 200, NOTHING_PENDING)
-                .on("POST", EVENTS, 500, "{\"error\":\"backend error: disk full\"}");
-        var call = parkedCall();
+    void aRuntimeHeldApprovalIsNeverDecidedWithTheAppsToken() {
+        runtime.on("GET", APPROVALS, 200,
+                "{\"pending\":[{\"node_id\":\"pay\",\"context\":{\"action_digest\":\"d\"}}],\"decided\":[]}");
 
-        var resp = controller.handleApproval("exec_1", ApprovalDecision.approved("alice", null));
+        var resp = controller.handleApproval("exec_1", ReviewDecision.approved(null), BOB);
+
+        assertThat(resp.getStatusCode().value()).isEqualTo(404);
+        assertThat((String) resp.getBody().get("error")).contains("your own runtime token");
+        assertThat(runtime.requests()).noneMatch(r -> r.method().equals("POST"));
+    }
+
+    @Test
+    void anUnrecordableDecisionIsABadGatewayAndRejectsTheCall() throws Exception {
+        runtime.on("POST", EVENTS, 500, "{\"error\":\"backend error: disk full\"}");
+        var call = parkedCall(null);
+
+        var resp = controller.handleApproval("exec_1", ReviewDecision.approved(null), BOB);
 
         assertThat(resp.getStatusCode().value()).isEqualTo(502);
         assertThat(resp.getBody()).containsEntry("error", "backend error: disk full");
@@ -150,39 +147,61 @@ class JamjetApprovalControllerTest {
     }
 
     @Test
-    void nothingPendingAnywhereIsNotFound() {
-        runtime.on("GET", APPROVALS, 200, NOTHING_PENDING);
+    void aRuntimeRefusalOfTheRecordKeepsItsStatus() throws Exception {
+        runtime.on("POST", EVENTS, 400, "{\"error\":\"invalid execution id: exec_1\"}");
+        var call = parkedCall(null);
 
-        var resp = controller.handleApproval("exec_1", ApprovalDecision.approved("alice", null));
+        var resp = controller.handleApproval("exec_1", ReviewDecision.approved(null), BOB);
 
-        assertThat(resp.getStatusCode().value()).isEqualTo(404);
-        assertThat(runtime.requests()).noneMatch(r -> r.method().equals("POST"));
+        assertThat(resp.getStatusCode().value()).isEqualTo(400);
+        assertThat(call.get(2, TimeUnit.SECONDS).isApproved()).isFalse();
     }
 
     @Test
     void aDecisionOtherThanApprovedOrRejectedIsABadRequest() {
-        var resp = controller.handleApproval("exec_1", new ApprovalDecision("yes", null, "a", null, null));
+        var resp = controller.handleApproval("exec_1", new ReviewDecision("yes", null), BOB);
 
         assertThat(resp.getStatusCode().value()).isEqualTo(400);
         assertThat(runtime.requests()).isEmpty();
     }
 
     @Test
-    void thePendingListShowsTheDigestTheReviewerMustEcho() throws Exception {
-        runtime.on("GET", APPROVALS, 200, RUNTIME_PENDING);
-        var call = parkedCall();
+    void unauthenticatedDecisionsAreRecordedAsSuchWhenExplicitlyAllowed() throws Exception {
+        runtime.on("POST", EVENTS, 200, "{\"accepted\":true}");
+        var open = new JamjetApprovalController(client, registry, true);
+        var call = parkedCall(null);
+
+        var resp = open.handleApproval("exec_1", ReviewDecision.approved(null), null);
+
+        assertThat(resp.getStatusCode().value()).isEqualTo(200);
+        var payload = recordedDecision().get("payload");
+        assertThat(payload.get("approver").asText()).isEqualTo("unauthenticated");
+        assertThat(payload.get("authenticated").asBoolean()).isFalse();
+        assertThat(call.get(2, TimeUnit.SECONDS).isApproved()).isTrue();
+    }
+
+    @Test
+    void thePendingListShowsRuntimeHeldRequestsReadOnlyWithTheCommand() throws Exception {
+        runtime.on("GET", APPROVALS, 200, """
+                {"pending":[{"node_id":"pay","tool_name":"send_wire","approver":"human","sequence":4,
+                  "context":{"action_digest":"d-123"}}],"decided":[]}
+                """);
+        var call = parkedCall(null);
 
         var listed = controller.listPending().getBody();
 
         assertThat(listed).singleElement().satisfies(item -> {
             assertThat(item).containsEntry("execution_id", "exec_1");
+            assertThat((String) item.get("runtime_requests_note")).contains("own runtime token");
             @SuppressWarnings("unchecked")
-            var requests = (java.util.List<java.util.Map<String, Object>>) item.get("runtime_requests");
+            var requests = (List<Map<String, Object>>) item.get("runtime_requests");
             assertThat(requests).singleElement().satisfies(r -> {
-                assertThat(r).containsEntry("node_id", "pay");
                 assertThat(r).containsEntry("action_digest", "d-123");
+                assertThat((String) r.get("decide_with"))
+                        .isEqualTo("jamjet approve exec_1 --decision approved --node-id pay --action-digest d-123");
             });
         });
+        assertThat(runtime.requests()).noneMatch(r -> r.method().equals("POST"));
         registry.complete("exec_1", ApprovalDecision.rejected("t", "cleanup"));
         call.get(2, TimeUnit.SECONDS);
     }

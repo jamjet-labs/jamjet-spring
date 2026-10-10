@@ -119,24 +119,39 @@ chatClient.prompt("Send the wire")
         .content();
 ```
 
-The call records `spring_ai.approval_requested` on its execution and blocks. A reviewer then uses the approval endpoints (registered in web applications):
+The call records `spring_ai.approval_requested` on its execution and blocks until a reviewer decides through the approval endpoints:
 
 ```bash
-# Calls waiting for a decision, with any approval requests the runtime holds for them
-curl http://localhost:8080/jamjet/approvals/pending
+# Calls waiting for a decision
+curl -u reviewer:secret http://localhost:8080/jamjet/approvals/pending
 
 # Decide
-curl -X POST http://localhost:8080/jamjet/approvals/{executionId} \
+curl -u reviewer:secret -X POST http://localhost:8080/jamjet/approvals/{executionId} \
   -H 'Content-Type: application/json' \
-  -d '{"decision":"approved","user_id":"alice","comment":"checked"}'
+  -d '{"decision":"approved","comment":"checked"}'
 ```
 
-The decision is recorded on the runtime before the call is released:
+**Reviewers must be authenticated.** The approver recorded on the runtime is the authenticated principal of the request; the body cannot name it, and a request with no principal gets 401 and releases nothing. The principal that triggered a call, when Spring Security knows it at call time, cannot approve that call (403). The endpoints are registered only when Spring Security is on the classpath. Protect them with a role, for example:
 
-- If the runtime holds a pending approval for the execution, the decision goes to `POST /executions/{id}/approve`. Send the `node_id` and the `action_digest` shown in `/pending` for the request you reviewed. Outside dev mode the runtime requires the digest to approve and refuses a decision made against a request that has since changed.
-- Otherwise it is appended as a `spring_ai.approval_decision` event.
+```java
+@Bean
+SecurityFilterChain approvals(HttpSecurity http) throws Exception {
+    return http
+            .securityMatcher("/jamjet/approvals/**")
+            .authorizeHttpRequests(a -> a.anyRequest().hasRole("APPROVER"))
+            .httpBasic(Customizer.withDefaults())
+            .csrf(csrf -> csrf.disable()) // or send the CSRF token with each POST
+            .build();
+}
+```
 
-If the runtime refuses the decision or cannot be reached, the endpoint answers with the runtime's status (or 502) and message, and the waiting call is released at once as rejected. Only `"approved"` lets a call through; a timeout applies `default-decision`, and anything other than `approved` rejects. A call marked as requiring approval never runs ungated: `JamjetApprovalGuard` is auto-configured on its own, independently of `durability-enabled` and `approval.enabled`, and refuses the call before the model runs when no approval advisor is on the ChatClient. A call whose execution could not be started (the runtime failed open) is rejected by the approval advisor.
+For local development without Spring Security, `spring.jamjet.approval.controller.allow-unauthenticated=true` registers the endpoints anyway, logs a warning at startup, and records decisions with approver `unauthenticated`. Anyone who can reach the application can then approve its calls.
+
+**Approvals the runtime holds are not decided here.** The runtime records the identity of the token that sends a decision and enforces separation of duties on it, so the application never forwards decisions with its own token. `/pending` lists any requests the runtime holds for a waiting call's execution, read-only, with their `action_digest` and the command to run with your own runtime token, for example `jamjet approve exec_... --decision approved --node-id pay --action-digest <digest>`.
+
+A decision is appended to the call's execution as a `spring_ai.approval_decision` event (approver, whether authenticated, the initiator when known, comment) before the call is released. If it cannot be recorded, the endpoint answers with the runtime's status (or 502) and message, and the waiting call is released as rejected. Only `"approved"` lets a call through; a timeout applies `default-decision`, and anything other than `approved` rejects.
+
+A call marked as requiring approval never runs ungated: `JamjetApprovalGuard` is auto-configured on its own, independently of `durability-enabled` and `approval.enabled`, and refuses the call before the model runs when no approval advisor is on the ChatClient. A call whose execution could not be started (the runtime failed open) is rejected by the approval advisor.
 
 ## Configuration
 
@@ -153,6 +168,7 @@ If the runtime refuses the decision or cannot be reached, the endpoint answers w
 | `spring.jamjet.approval.enabled` | `false` | Add the approval advisor and endpoints |
 | `spring.jamjet.approval.timeout` | `30m` | How long a call waits for a decision |
 | `spring.jamjet.approval.default-decision` | `rejected` | Decision applied on timeout |
+| `spring.jamjet.approval.controller.allow-unauthenticated` | `false` | Register the approval endpoints without Spring Security (local development only) |
 | `spring.jamjet.connect-timeout-seconds` | `10` | Connection timeout |
 | `spring.jamjet.read-timeout-seconds` | `120` | Read timeout |
 

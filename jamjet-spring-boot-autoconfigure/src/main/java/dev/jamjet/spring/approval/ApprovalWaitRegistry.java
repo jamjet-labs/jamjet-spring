@@ -23,7 +23,12 @@ import java.util.concurrent.TimeoutException;
  */
 public class ApprovalWaitRegistry {
 
-    private record Waiter(CompletableFuture<ApprovalDecision> decision, Instant since) {}
+    /** What the paused call carries for its reviewer. {@code initiator} is null when unknown. */
+    public record WaitContext(String initiator) {
+        public static final WaitContext NONE = new WaitContext(null);
+    }
+
+    private record Waiter(CompletableFuture<ApprovalDecision> decision, Instant since, WaitContext context) {}
 
     private final ConcurrentHashMap<String, Waiter> pending = new ConcurrentHashMap<>();
 
@@ -33,8 +38,15 @@ public class ApprovalWaitRegistry {
      */
     public ApprovalDecision waitForApproval(String executionId, Duration timeout)
             throws TimeoutException, InterruptedException {
+        return waitForApproval(executionId, timeout, WaitContext.NONE);
+    }
+
+    /** As {@link #waitForApproval(String, Duration)}, recording what the reviewer is shown. */
+    public ApprovalDecision waitForApproval(String executionId, Duration timeout, WaitContext context)
+            throws TimeoutException, InterruptedException {
         var waiter = pending.computeIfAbsent(executionId,
-                k -> new Waiter(new CompletableFuture<>(), Instant.now()));
+                k -> new Waiter(new CompletableFuture<>(), Instant.now(),
+                        context == null ? WaitContext.NONE : context));
         try {
             return waiter.decision().get(timeout.toMillis(), TimeUnit.MILLISECONDS);
         } catch (TimeoutException e) {
@@ -59,6 +71,12 @@ public class ApprovalWaitRegistry {
         return waiter.decision().complete(decision);
     }
 
+    /** The waiting call's context, or null if no call is waiting. */
+    public WaitContext context(String executionId) {
+        var waiter = pending.get(executionId);
+        return waiter == null ? null : waiter.context();
+    }
+
     /** True if a call is waiting for a decision on this execution. */
     public boolean isPending(String executionId) {
         return pending.containsKey(executionId);
@@ -67,11 +85,11 @@ public class ApprovalWaitRegistry {
     /** All calls currently waiting, oldest first. */
     public List<PendingApproval> allPending() {
         return pending.entrySet().stream()
-                .map(e -> new PendingApproval(e.getKey(), e.getValue().since()))
+                .map(e -> new PendingApproval(e.getKey(), e.getValue().since(), e.getValue().context()))
                 .sorted(Comparator.comparing(PendingApproval::waitingSince))
                 .toList();
     }
 
-    public record PendingApproval(String executionId, Instant waitingSince) {
+    public record PendingApproval(String executionId, Instant waitingSince, WaitContext context) {
     }
 }

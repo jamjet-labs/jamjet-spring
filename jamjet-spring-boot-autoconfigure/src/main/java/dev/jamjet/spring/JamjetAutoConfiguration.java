@@ -159,7 +159,8 @@ public class JamjetAutoConfiguration {
         return new JamjetApprovalController(client, waitRegistry, ReviewPolicy.defaults()
                 .withAllowUnauthenticated(open)
                 .withAllowRememberMe(properties.getApproval().isAllowRememberMe())
-                .withRequiredAuthority(properties.getApproval().getRequiredAuthority()));
+                .withRequiredAuthority(properties.getApproval().getRequiredAuthority())
+                .withAllowUnknownInitiator(properties.getApproval().isAllowUnknownInitiator()));
     }
 
     /** Spring Security present, or unauthenticated decisions explicitly allowed. */

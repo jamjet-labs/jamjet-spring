@@ -11,6 +11,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.advisor.api.AdvisorChain;
 import org.springframework.ai.chat.client.advisor.api.BaseAdvisor;
+import org.springframework.ai.chat.client.advisor.api.StreamAdvisorChain;
+import reactor.core.publisher.Flux;
 import org.springframework.ai.chat.client.ChatClientRequest;
 import org.springframework.ai.chat.client.ChatClientResponse;
 import org.springframework.core.Ordered;
@@ -46,6 +48,12 @@ public class JamjetApprovalAdvisor implements BaseAdvisor {
 
     /** Context key to explicitly require approval for a request. */
     public static final String REQUIRES_APPROVAL_KEY = "jamjet.approval.required";
+
+    /**
+     * Context key carrying the principal that triggered the call, captured on the
+     * caller's thread (or from the Reactor context) before any thread hop.
+     */
+    public static final String INITIATOR_KEY = "jamjet.approval.initiator";
 
     /** Correlation key of the event recording that a call is waiting for approval. */
     public static final String REQUESTED_EVENT = "spring_ai.approval_requested";
@@ -117,10 +125,15 @@ public class JamjetApprovalAdvisor implements BaseAdvisor {
                             + "(is the durability advisor enabled and recording?)");
         }
 
+        String initiator = initiatorOf(request.context());
         try {
             var payload = new LinkedHashMap<String, Object>();
             payload.put("advisor", getName());
             payload.put("timeout", properties.getApproval().getTimeout());
+            if (initiator != null) {
+                payload.put("initiator", initiator);
+            }
+            payload.put("initiator_known", initiator != null);
             client.sendExternalEvent(executionId, REQUESTED_EVENT, payload);
         } catch (JamjetClientException e) {
             RuntimeErrors.handle(properties, log, "record the approval request for execution " + executionId, e);
@@ -132,7 +145,7 @@ public class JamjetApprovalAdvisor implements BaseAdvisor {
             Duration timeout = parseTimeout(properties.getApproval().getTimeout());
             // Who triggered the call, if Spring Security knows: that principal
             // cannot approve it (separation of duties, enforced by the controller).
-            var context = new ApprovalWaitRegistry.WaitContext(CurrentPrincipal.name(),
+            var context = new ApprovalWaitRegistry.WaitContext(initiator,
                     ApprovalContent.preview(request.prompt()), ApprovalContent.digest(request.prompt()));
             ApprovalDecision decision = waitRegistry.waitForApproval(executionId, timeout, context,
                     decidingGrace(properties));
@@ -155,6 +168,42 @@ public class JamjetApprovalAdvisor implements BaseAdvisor {
             Thread.currentThread().interrupt();
             throw new ApprovalRejectedException(executionId, "approval wait interrupted");
         }
+    }
+
+    /**
+     * Streams: the default {@code adviseStream} runs {@link #before} after a hop
+     * to another thread, where the caller's SecurityContext is gone. Capture the
+     * initiator here, on the subscribing thread or from the Reactor context.
+     */
+    @Override
+    public Flux<ChatClientResponse> adviseStream(ChatClientRequest request, StreamAdvisorChain chain) {
+        if (!requiresApproval(request) || request.context().get(INITIATOR_KEY) instanceof String) {
+            return BaseAdvisor.super.adviseStream(request, chain);
+        }
+        String onThisThread = CurrentPrincipal.name();
+        return CurrentPrincipal.reactiveName().defaultIfEmpty("")
+                .flatMapMany(reactive -> BaseAdvisor.super.adviseStream(
+                        withInitiator(request, onThisThread != null ? onThisThread
+                                : reactive.isEmpty() ? null : reactive), chain));
+    }
+
+    /** The captured initiator, or the current thread's principal when none was captured. */
+    static String initiatorOf(java.util.Map<String, Object> context) {
+        Object captured = context == null ? null : context.get(INITIATOR_KEY);
+        if (captured instanceof String s && !s.isBlank()) {
+            return s;
+        }
+        return CurrentPrincipal.name();
+    }
+
+    /** The request with the initiator in its context, unless one is already there or none is known. */
+    public static ChatClientRequest withInitiator(ChatClientRequest request, String initiator) {
+        if (initiator == null || request.context().get(INITIATOR_KEY) instanceof String) {
+            return request;
+        }
+        var context = new java.util.LinkedHashMap<>(request.context());
+        context.put(INITIATOR_KEY, initiator);
+        return request.mutate().context(context).build();
     }
 
     @Override

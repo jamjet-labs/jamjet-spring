@@ -1,6 +1,7 @@
 package dev.jamjet.spring.advisor;
 
 import dev.jamjet.spring.JamjetGovernanceException;
+import dev.jamjet.spring.approval.CurrentPrincipal;
 import org.springframework.ai.chat.client.ChatClientRequest;
 import org.springframework.ai.chat.client.ChatClientResponse;
 import org.springframework.ai.chat.client.advisor.api.CallAdvisor;
@@ -33,20 +34,30 @@ public class JamjetApprovalGuard implements CallAdvisor, StreamAdvisor {
 
     @Override
     public ChatClientResponse adviseCall(ChatClientRequest request, CallAdvisorChain chain) {
-        if (JamjetApprovalAdvisor.requiresApproval(request.context())
-                && chain.getCallAdvisors().stream().noneMatch(a -> a instanceof JamjetApprovalAdvisor)) {
+        if (!JamjetApprovalAdvisor.requiresApproval(request.context())) {
+            return chain.nextCall(request);
+        }
+        if (chain.getCallAdvisors().stream().noneMatch(a -> a instanceof JamjetApprovalAdvisor)) {
             throw refusal();
         }
-        return chain.nextCall(request);
+        // First in the chain, on the caller's thread: capture who triggered the call.
+        return chain.nextCall(JamjetApprovalAdvisor.withInitiator(request, CurrentPrincipal.name()));
     }
 
     @Override
     public Flux<ChatClientResponse> adviseStream(ChatClientRequest request, StreamAdvisorChain chain) {
-        if (JamjetApprovalAdvisor.requiresApproval(request.context())
-                && chain.getStreamAdvisors().stream().noneMatch(a -> a instanceof JamjetApprovalAdvisor)) {
+        if (!JamjetApprovalAdvisor.requiresApproval(request.context())) {
+            return chain.nextStream(request);
+        }
+        if (chain.getStreamAdvisors().stream().noneMatch(a -> a instanceof JamjetApprovalAdvisor)) {
             return Flux.error(refusal());
         }
-        return chain.nextStream(request);
+        // Capture who triggered the call before later advisors hop threads: on this
+        // thread, or from the Reactor context (WebFlux).
+        String onThisThread = CurrentPrincipal.name();
+        return CurrentPrincipal.reactiveName().defaultIfEmpty("")
+                .flatMapMany(reactive -> chain.nextStream(JamjetApprovalAdvisor.withInitiator(request,
+                        onThisThread != null ? onThisThread : reactive.isEmpty() ? null : reactive)));
     }
 
     private static JamjetGovernanceException refusal() {

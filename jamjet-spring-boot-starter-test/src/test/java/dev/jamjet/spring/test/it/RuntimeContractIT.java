@@ -171,9 +171,20 @@ class RuntimeContractIT {
                         new JamjetApprovalAdvisor(client, props, registry))
                 .build();
 
-        var call = CompletableFuture.supplyAsync(() -> chat.prompt("send the wire")
-                .advisors(a -> a.param(JamjetApprovalAdvisor.REQUIRES_APPROVAL_KEY, true))
-                .call().content());
+        // The call is made by an authenticated user, as in a web request.
+        var call = CompletableFuture.supplyAsync(() -> {
+            var ctx = org.springframework.security.core.context.SecurityContextHolder.createEmptyContext();
+            ctx.setAuthentication(new org.springframework.security.authentication.UsernamePasswordAuthenticationToken(
+                    "requester", "n/a", List.of()));
+            org.springframework.security.core.context.SecurityContextHolder.setContext(ctx);
+            try {
+                return chat.prompt("send the wire")
+                        .advisors(a -> a.param(JamjetApprovalAdvisor.REQUIRES_APPROVAL_KEY, true))
+                        .call().content();
+            } finally {
+                org.springframework.security.core.context.SecurityContextHolder.clearContext();
+            }
+        });
 
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
         while (registry.allPending().isEmpty()) {
@@ -202,7 +213,8 @@ class RuntimeContractIT {
                 .containsSubsequence("spring_ai.approval_requested", "spring_ai.approval_decision", "spring_ai.completed");
         assertThat(external(events, "spring_ai.approval_decision").payload())
                 .containsEntry("decision", "approved").containsEntry("approver", "alice")
-                .containsEntry("authenticated", true).containsEntry("content_digest", digest);
+                .containsEntry("authenticated", true).containsEntry("content_digest", digest)
+                .containsEntry("initiator", "requester");
     }
 
     @Test

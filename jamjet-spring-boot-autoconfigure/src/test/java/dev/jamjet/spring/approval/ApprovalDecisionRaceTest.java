@@ -36,7 +36,10 @@ class ApprovalDecisionRaceTest {
         props.setRuntimeUrl(runtime.url());
         registry = new ApprovalWaitRegistry();
         var client = new JamjetRuntimeClient(props);
-        controller = new JamjetApprovalController(client, registry);
+        // These calls run with no SecurityContext, so their initiator is unknown;
+        // this test is about the claim, not separation of duties.
+        controller = new JamjetApprovalController(client, registry,
+                ReviewPolicy.defaults().withAllowUnknownInitiator(true));
         model = StubChatModel.answering("wire sent");
         chat = ChatClient.builder(model)
                 .defaultAdvisors(new JamjetApprovalAdvisor(client, props, registry)).build();

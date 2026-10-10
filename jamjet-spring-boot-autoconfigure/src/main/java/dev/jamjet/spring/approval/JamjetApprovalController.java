@@ -115,6 +115,12 @@ public class JamjetApprovalController {
             return error(HttpStatus.CONFLICT, executionId, "content_digest does not match the waiting call; "
                     + "re-read GET /jamjet/approvals/pending and decide again", null);
         }
+        if (waiting.initiator() == null && "approved".equals(decision.decision())
+                && !policy.allowUnknownInitiator()) {
+            return error(HttpStatus.FORBIDDEN, executionId, "separation of duties: who triggered this call is "
+                    + "unknown, so it cannot be approved (it can be rejected). Set "
+                    + "spring.jamjet.approval.allow-unknown-initiator=true to approve such calls.", null);
+        }
         if (approver.equals(waiting.initiator()) && "approved".equals(decision.decision())) {
             return error(HttpStatus.FORBIDDEN, executionId,
                     "separation of duties: " + approver + " triggered this call and cannot approve it", null);
@@ -136,6 +142,7 @@ public class JamjetApprovalController {
             if (waiting.initiator() != null) {
                 payload.put("initiator", waiting.initiator());
             }
+            payload.put("initiator_known", waiting.initiator() != null);
             payload.put("content_digest", decision.contentDigest());
             if (decision.comment() != null) {
                 payload.put("comment", decision.comment());

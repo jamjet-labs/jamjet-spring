@@ -246,6 +246,20 @@ public class JamjetProperties {
             this.requiredAuthority = requiredAuthority;
         }
 
+        /**
+         * Allow approving a call whose initiator could not be determined (no
+         * SecurityContext at call time), so separation of duties cannot be checked.
+         */
+        private boolean allowUnknownInitiator = false;
+
+        public boolean isAllowUnknownInitiator() {
+            return allowUnknownInitiator;
+        }
+
+        public void setAllowUnknownInitiator(boolean allowUnknownInitiator) {
+            this.allowUnknownInitiator = allowUnknownInitiator;
+        }
+
         /** Accept a remember-me login as a reviewer. Off: a reviewer must have signed in this session. */
         private boolean allowRememberMe = false;
 

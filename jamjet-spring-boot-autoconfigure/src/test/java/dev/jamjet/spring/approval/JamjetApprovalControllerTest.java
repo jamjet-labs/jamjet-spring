@@ -81,7 +81,7 @@ class JamjetApprovalControllerTest {
     @Test
     void noAuthenticatedReviewerIsUnauthorizedAndReleasesNothing() throws Exception {
         runtime.on("POST", EVENTS, 200, "{\"accepted\":true}");
-        var call = parkedCall(null);
+        var call = parkedCall("erin");
 
         var resp = controller.handleApproval("exec_1", approved(), null);
 
@@ -95,7 +95,7 @@ class JamjetApprovalControllerTest {
     @Test
     void theApproverIsThePrincipalNeverTheBody() throws Exception {
         runtime.on("POST", EVENTS, 200, "{\"accepted\":true}");
-        var call = parkedCall(null);
+        var call = parkedCall("erin");
         // An older client still sends user_id; it must not be what is recorded.
         var body = JSON.readValue("{\"decision\":\"approved\",\"user_id\":\"alice\",\"comment\":\"ok\",\"content_digest\":\"c0ffee\"}",
                 ReviewDecision.class);
@@ -142,7 +142,7 @@ class JamjetApprovalControllerTest {
     @Test
     void anUnrecordableDecisionIsABadGatewayAndRejectsTheCall() throws Exception {
         runtime.on("POST", EVENTS, 500, "{\"error\":\"backend error: disk full\"}");
-        var call = parkedCall(null);
+        var call = parkedCall("erin");
 
         var resp = controller.handleApproval("exec_1", approved(), BOB);
 
@@ -154,7 +154,7 @@ class JamjetApprovalControllerTest {
     @Test
     void aRuntimeRefusalOfTheRecordKeepsItsStatus() throws Exception {
         runtime.on("POST", EVENTS, 400, "{\"error\":\"invalid execution id: exec_1\"}");
-        var call = parkedCall(null);
+        var call = parkedCall("erin");
 
         var resp = controller.handleApproval("exec_1", approved(), BOB);
 
@@ -174,7 +174,7 @@ class JamjetApprovalControllerTest {
     void unauthenticatedDecisionsAreRecordedAsSuchWhenExplicitlyAllowed() throws Exception {
         runtime.on("POST", EVENTS, 200, "{\"accepted\":true}");
         var open = new JamjetApprovalController(client, registry, ReviewPolicy.defaults().withAllowUnauthenticated(true));
-        var call = parkedCall(null);
+        var call = parkedCall("erin");
 
         var resp = open.handleApproval("exec_1", approved(), null);
 
@@ -191,7 +191,7 @@ class JamjetApprovalControllerTest {
                 {"pending":[{"node_id":"pay","tool_name":"send_wire","approver":"human","sequence":4,
                   "context":{"action_digest":"d-123"}}],"decided":[]}
                 """);
-        var call = parkedCall(null);
+        var call = parkedCall("erin");
 
         var listed = pending(controller, BOB);
 
@@ -214,7 +214,7 @@ class JamjetApprovalControllerTest {
     @Test
     void aDecisionMustEchoTheContentDigestTheReviewerWasShown() throws Exception {
         runtime.on("POST", EVENTS, 200, "{\"accepted\":true}");
-        var call = parkedCall(null);
+        var call = parkedCall("erin");
 
         var missing = controller.handleApproval("exec_1", new ReviewDecision("approved", null, null), BOB);
         var stale = controller.handleApproval("exec_1", new ReviewDecision("approved", null, "beef"), BOB);
@@ -233,7 +233,7 @@ class JamjetApprovalControllerTest {
     @Test
     void thePendingListShowsWhatIsBeingApproved() throws Exception {
         runtime.on("GET", APPROVALS, 200, "{\"pending\":[],\"decided\":[]}");
-        var call = parkedCall(null);
+        var call = parkedCall("erin");
 
         var item = pending(controller, BOB).get(0);
 

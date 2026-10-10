@@ -1,8 +1,10 @@
 package dev.jamjet.spring.approval;
 
 import org.springframework.security.authentication.AnonymousAuthenticationToken;
+import org.springframework.security.core.context.ReactiveSecurityContextHolder;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.util.ClassUtils;
+import reactor.core.publisher.Mono;
 
 /**
  * The authenticated principal on the current thread, from Spring Security's
@@ -24,10 +26,30 @@ public final class CurrentPrincipal {
         return SECURITY_PRESENT ? Security.name() : null;
     }
 
+    /**
+     * The authenticated principal in the Reactor context (WebFlux,
+     * {@code ReactiveSecurityContextHolder}); empty when there is none.
+     */
+    public static Mono<String> reactiveName() {
+        return SECURITY_PRESENT ? Security.reactiveName() : Mono.empty();
+    }
+
     /** Only loaded when Spring Security is present. */
     private static final class Security {
         static String name() {
-            var auth = SecurityContextHolder.getContext().getAuthentication();
+            return nameOf(SecurityContextHolder.getContext().getAuthentication());
+        }
+
+        static Mono<String> reactiveName() {
+            return ReactiveSecurityContextHolder.getContext()
+                    .map(ctx -> {
+                        String n = nameOf(ctx.getAuthentication());
+                        return n == null ? "" : n;
+                    })
+                    .filter(n -> !n.isEmpty());
+        }
+
+        static String nameOf(org.springframework.security.core.Authentication auth) {
             if (auth == null || !auth.isAuthenticated() || auth instanceof AnonymousAuthenticationToken) {
                 return null;
             }

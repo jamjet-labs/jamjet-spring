@@ -19,7 +19,7 @@ import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.Collections;
 
 /**
  * A LangChain4j {@link ChatMemoryStore} backed by the JamJet runtime's event log.
@@ -37,8 +37,10 @@ import java.util.concurrent.ConcurrentHashMap;
  * <p>The runtime has no lookup by input, so the first access to a memory id in a
  * process scans {@code GET /executions} for its execution and caches the result.
  * The scan is linear in the tenant's execution count. A miss is cached too (for
- * {@link #DEFAULT_MISS_TTL}), so a new conversation scans once. Each id has its
- * own lock; different conversations never wait for each other's scan.
+ * {@link #DEFAULT_MISS_TTL}), so a new conversation scans once. Locks are striped
+ * by id (64 stripes), so conversations rarely wait for each other's scan, and
+ * both caches are bounded ({@link #DEFAULT_MAX_CACHED_IDS} each, least recently
+ * used evicted; an evicted id is simply scanned for again).
  *
  * <p><b>One writer per memory id.</b> Two processes (replicas) that both write a
  * new id before either has seen the other's execution each start one, and the
@@ -63,6 +65,9 @@ public class JamjetChatMemoryStore implements ChatMemoryStore {
     /** Correlation key of a memory delete. */
     public static final String CLEARED_EVENT = "chat_memory_cleared";
 
+    /** Default bound on each of the found and not-found id caches. */
+    public static final int DEFAULT_MAX_CACHED_IDS = 10_000;
+
     /** How long a scan that found nothing is trusted before scanning again. */
     public static final Duration DEFAULT_MISS_TTL = Duration.ofSeconds(30);
 
@@ -72,9 +77,10 @@ public class JamjetChatMemoryStore implements ChatMemoryStore {
     private final String namespace;
     private final RuntimeErrorMode mode;
     private final Duration missTtl;
-    private final ConcurrentHashMap<String, String> executions = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, Instant> misses = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, Object> locks = new ConcurrentHashMap<>();
+    private final Map<String, String> executions;
+    private final Map<String, Instant> misses;
+    /** Striped: bounded no matter how many memory ids a process sees. */
+    private final Object[] locks = new Object[64];
     private volatile boolean registered;
 
     /** Fail-closed store for this namespace (use the application's name). */
@@ -88,6 +94,15 @@ public class JamjetChatMemoryStore implements ChatMemoryStore {
 
     public JamjetChatMemoryStore(JamjetRuntimeClient client, String namespace, RuntimeErrorMode mode,
                                  Duration missTtl) {
+        this(client, namespace, mode, missTtl, DEFAULT_MAX_CACHED_IDS);
+    }
+
+    /**
+     * @param maxCachedIds how many memory ids the found and not-found caches each
+     *                     keep (least recently used evicted); an evicted id is scanned for again
+     */
+    public JamjetChatMemoryStore(JamjetRuntimeClient client, String namespace, RuntimeErrorMode mode,
+                                 Duration missTtl, int maxCachedIds) {
         if (namespace == null || namespace.isBlank()) {
             throw new IllegalArgumentException("a namespace is required (use the application's name), so two "
                     + "applications on one runtime tenant do not share chat memory");
@@ -96,6 +111,26 @@ public class JamjetChatMemoryStore implements ChatMemoryStore {
         this.namespace = namespace;
         this.mode = mode == null ? RuntimeErrorMode.FAIL_CLOSED : mode;
         this.missTtl = missTtl == null ? DEFAULT_MISS_TTL : missTtl;
+        this.executions = lru(maxCachedIds);
+        this.misses = lru(maxCachedIds);
+        for (int i = 0; i < locks.length; i++) {
+            locks[i] = new Object();
+        }
+    }
+
+    private static <V> Map<String, V> lru(int max) {
+        int bound = Math.max(1, max);
+        return Collections.synchronizedMap(new LinkedHashMap<String, V>(16, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<String, V> eldest) {
+                return size() > bound;
+            }
+        });
+    }
+
+    /** Ids currently held in the found and not-found caches (for tests and metrics). */
+    int cachedIds() {
+        return executions.size() + misses.size();
     }
 
     public String namespace() {
@@ -218,7 +253,7 @@ public class JamjetChatMemoryStore implements ChatMemoryStore {
     }
 
     private Object lockFor(String memoryId) {
-        return locks.computeIfAbsent(memoryId, k -> new Object());
+        return locks[Math.floorMod(memoryId.hashCode(), locks.length)];
     }
 
     /** The most recently started chat-memory execution for this id, or null. */

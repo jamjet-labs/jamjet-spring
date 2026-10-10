@@ -146,4 +146,17 @@ class JamjetChatMemoryStoreTest {
 
         assertThat(store.getMessages("b")).containsExactly(UserMessage.from("two"));
     }
+
+    @Test
+    void theIdCachesStayBoundedAndAnEvictedIdIsFoundAgain() {
+        var small = new JamjetChatMemoryStore(runtime, "app-a", RuntimeErrorMode.FAIL_CLOSED,
+                java.time.Duration.ofSeconds(30), 3);
+        for (int i = 0; i < 10; i++) {
+            small.updateMessages("conv-" + i, List.of(UserMessage.from("m" + i)));
+            small.getMessages("never-" + i);
+        }
+
+        assertThat(small.cachedIds()).isLessThanOrEqualTo(6);
+        assertThat(small.getMessages("conv-0")).containsExactly(UserMessage.from("m0"));
+    }
 }

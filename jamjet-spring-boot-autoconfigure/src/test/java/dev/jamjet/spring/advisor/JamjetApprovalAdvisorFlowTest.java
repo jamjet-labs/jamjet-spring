@@ -116,4 +116,48 @@ class JamjetApprovalAdvisorFlowTest {
         assertThat(registry.allPending()).isEmpty();
         assertThat(model.calls).hasValue(0);
     }
+
+    private ChatClient withTimeout(String timeout, String defaultDecision) {
+        props.getApproval().setTimeout(timeout);
+        if (defaultDecision != null) {
+            props.getApproval().setDefaultDecision(defaultDecision);
+        }
+        var advisor = new JamjetApprovalAdvisor(new JamjetRuntimeClient(props), props, registry);
+        return ChatClient.builder(model).defaultAdvisors(advisor).build();
+    }
+
+    private String unattended(ChatClient client) {
+        return client.prompt("wire 100")
+                .advisors(a -> a.param(JamjetApprovalAdvisor.REQUIRES_APPROVAL_KEY, true)
+                        .param(JamjetDurabilityAdvisor.EXECUTION_ID_KEY, "exec_1"))
+                .call().content();
+    }
+
+    @Test
+    void anUnansweredCallIsRejectedByDefaultWhenItTimesOut() {
+        runtime.on("POST", EVENTS, 200, "{\"execution_id\":\"exec_1\",\"accepted\":true}");
+
+        assertThatThrownBy(() -> unattended(withTimeout("1s", null)))
+                .isInstanceOf(ApprovalRejectedException.class)
+                .hasMessageContaining("timed out");
+        assertThat(model.calls).as("an unattended call never reaches the model").hasValue(0);
+        assertThat(registry.allPending()).isEmpty();
+    }
+
+    @Test
+    void aTimeoutAppliesAnExplicitApprovedDefault() {
+        runtime.on("POST", EVENTS, 200, "{\"execution_id\":\"exec_1\",\"accepted\":true}");
+
+        assertThat(unattended(withTimeout("1s", "approved"))).isEqualTo("hello");
+        assertThat(model.calls).hasValue(1);
+    }
+
+    @Test
+    void anUnrecognisedDefaultDecisionRejectsOnTimeout() {
+        runtime.on("POST", EVENTS, 200, "{\"execution_id\":\"exec_1\",\"accepted\":true}");
+
+        assertThatThrownBy(() -> unattended(withTimeout("1s", "maybe")))
+                .isInstanceOf(ApprovalRejectedException.class);
+        assertThat(model.calls).hasValue(0);
+    }
 }

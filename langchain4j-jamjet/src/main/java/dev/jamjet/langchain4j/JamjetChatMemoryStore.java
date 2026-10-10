@@ -168,10 +168,14 @@ public class JamjetChatMemoryStore implements ChatMemoryStore {
         }
     }
 
+    static Map<String, Object> workflowIr() {
+        return RecordedCallWorkflow.ir(WORKFLOW_ID, "memory",
+                "langchain4j.chat_memory.closed", "LangChain4j chat memory", "langchain4j-jamjet");
+    }
+
     private void ensureRegistered() {
         if (!registered) {
-            client.createWorkflow(RecordedCallWorkflow.ir(WORKFLOW_ID, "memory",
-                    "langchain4j.chat_memory.closed", "LangChain4j chat memory", "langchain4j-jamjet"));
+            client.createWorkflow(workflowIr());
             registered = true;
         }
     }

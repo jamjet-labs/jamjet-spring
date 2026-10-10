@@ -13,6 +13,7 @@ public class JamjetConfig {
     private int readTimeoutSeconds = 120;
     private RuntimeErrorMode onRuntimeError = RuntimeErrorMode.FAIL_CLOSED;
     private String memoryNamespace;
+    private boolean recordContent = true;
 
     public JamjetConfig runtimeUrl(String url) {
         this.runtimeUrl = url;
@@ -54,9 +55,22 @@ public class JamjetConfig {
         return this;
     }
 
-    /** Wrap an AI service with this config's client and error mode. */
+    /**
+     * Record wrapped calls' arguments and results on the runtime (default
+     * {@code true}). Turn off when they carry data that must not leave the app.
+     */
+    public JamjetConfig recordContent(boolean recordContent) {
+        this.recordContent = recordContent;
+        return this;
+    }
+
+    public boolean isRecordContent() {
+        return recordContent;
+    }
+
+    /** Wrap an AI service with this config's client, error mode and content setting. */
     public <T> T wrap(T aiService, Class<T> iface) {
-        return JamjetDurableAgent.wrap(aiService, iface, buildClient(), onRuntimeError);
+        return JamjetDurableAgent.wrap(aiService, iface, buildClient(), onRuntimeError, recordContent);
     }
 
     /**

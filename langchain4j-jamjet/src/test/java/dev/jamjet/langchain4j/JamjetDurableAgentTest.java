@@ -133,4 +133,42 @@ class JamjetDurableAgentTest {
                 .satisfies(e -> assertThat(e.getSuppressed())
                         .anySatisfy(x -> assertThat(x).isInstanceOf(dev.jamjet.spring.JamjetRecordingException.class)));
     }
+
+    @Test
+    void contentRecordingCanBeTurnedOff() {
+        TestAssistant durable = JamjetDurableAgent.wrap(new SimpleAssistant(), TestAssistant.class, runtime,
+                RuntimeErrorMode.FAIL_CLOSED, false);
+
+        durable.answer("my account number is 12345");
+
+        var input = runtime.executions().get(0).initialInput();
+        assertThat(input).doesNotContainKey("args").containsEntry("arg_count", 1);
+        assertThat(runtime.getEvents()).singleElement().satisfies(e -> {
+            assertThat(e.payload()).containsEntry("status", "completed").doesNotContainKey("result");
+            assertThat(e.payload().toString()).doesNotContain("12345");
+        });
+    }
+
+    @Test
+    void withContentOffAFailureRecordsOnlyTheErrorType() {
+        TestAssistant failing = q -> { throw new IllegalStateException("leaked " + q); };
+        TestAssistant durable = JamjetDurableAgent.wrap(failing, TestAssistant.class, runtime,
+                RuntimeErrorMode.FAIL_CLOSED, false);
+
+        assertThatThrownBy(() -> durable.answer("secret-42")).isInstanceOf(IllegalStateException.class);
+
+        assertThat(runtime.getEvents()).singleElement().satisfies(e -> {
+            assertThat(e.payload()).containsEntry("status", "failed").containsEntry("error", "IllegalStateException");
+            assertThat(e.payload().toString()).doesNotContain("secret-42");
+        });
+    }
+
+    @Test
+    void contentIsRecordedByDefault() {
+        JamjetDurableAgent.wrap(new SimpleAssistant(), TestAssistant.class, runtime).answer("visible");
+
+        assertThat(runtime.executions().get(0).initialInput()).containsKey("args");
+        assertThat(runtime.getEvents().get(0).payload()).containsEntry("result", "Answer to: visible");
+        assertThat(new JamjetConfig().isRecordContent()).isTrue();
+    }
 }

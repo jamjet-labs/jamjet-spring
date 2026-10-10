@@ -172,6 +172,10 @@ class StubRuntimeClient extends JamjetRuntimeClient {
         return executions.size();
     }
 
+    List<ExecutionState> executions() {
+        return List.copyOf(executions);
+    }
+
     Map<String, Object> registeredIr(String workflowId) {
         return workflows.get(workflowId + "@1.0.0");
     }

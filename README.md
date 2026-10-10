@@ -272,6 +272,8 @@ MyAssistant raw = AiServices.builder(MyAssistant.class)
 MyAssistant recorded = jamjet.wrap(raw, MyAssistant.class);
 ```
 
+Arguments and results are recorded by default. `new JamjetConfig().recordContent(false)` records only the method, the argument count, the outcome and, on failure, the exception type.
+
 **Chat memory on the runtime**: each (namespace, memory id) is one execution of the `langchain4j-chat-memory` workflow; every update appends the full message list as a `chat_memory` event and reads take the latest one. Set the namespace to your application's name, so two applications on one runtime tenant do not read each other's memory under the same id (LangChain4j's default id is `"default"`):
 
 ```java

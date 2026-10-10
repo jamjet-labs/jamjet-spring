@@ -42,12 +42,23 @@ public final class JamjetDurableAgent {
         return wrap(aiService, iface, client, RuntimeErrorMode.FAIL_CLOSED);
     }
 
-    @SuppressWarnings("unchecked")
     public static <T> T wrap(T aiService, Class<T> iface, JamjetRuntimeClient client, RuntimeErrorMode mode) {
+        return wrap(aiService, iface, client, mode, true);
+    }
+
+    /**
+     * @param recordContent record the call's arguments and result (default {@code true}).
+     *     With {@code false} only the method, the argument count, the outcome and,
+     *     on failure, the exception type are recorded.
+     */
+    @SuppressWarnings("unchecked")
+    public static <T> T wrap(T aiService, Class<T> iface, JamjetRuntimeClient client, RuntimeErrorMode mode,
+                             boolean recordContent) {
         return (T) Proxy.newProxyInstance(
                 iface.getClassLoader(),
                 new Class<?>[]{ iface },
-                new DurabilityHandler<>(aiService, client, mode == null ? RuntimeErrorMode.FAIL_CLOSED : mode));
+                new DurabilityHandler<>(aiService, client, mode == null ? RuntimeErrorMode.FAIL_CLOSED : mode,
+                        recordContent));
     }
 
     static Map<String, Object> workflowIr() {
@@ -62,12 +73,14 @@ public final class JamjetDurableAgent {
         private final T delegate;
         private final JamjetRuntimeClient client;
         private final RuntimeErrorMode mode;
+        private final boolean recordContent;
         private volatile boolean registered;
 
-        DurabilityHandler(T delegate, JamjetRuntimeClient client, RuntimeErrorMode mode) {
+        DurabilityHandler(T delegate, JamjetRuntimeClient client, RuntimeErrorMode mode, boolean recordContent) {
             this.delegate = delegate;
             this.client = client;
             this.mode = mode;
+            this.recordContent = recordContent;
         }
 
         @Override
@@ -82,7 +95,11 @@ public final class JamjetDurableAgent {
                 var input = new LinkedHashMap<String, Object>();
                 input.put("interface", method.getDeclaringClass().getName());
                 input.put("method", method.getName());
-                input.put("args", args != null ? Arrays.stream(args).map(String::valueOf).toList() : List.of());
+                if (recordContent) {
+                    input.put("args", args != null ? Arrays.stream(args).map(String::valueOf).toList() : List.of());
+                } else {
+                    input.put("arg_count", args != null ? args.length : 0);
+                }
                 var started = client.startExecution(WORKFLOW_ID, RecordedCallWorkflow.VERSION, input);
                 executionId = started != null ? started.executionId() : null;
                 if (executionId == null || executionId.isBlank()) {
@@ -100,7 +117,9 @@ public final class JamjetDurableAgent {
                 recordFailure(executionId, t);
                 throw t;
             }
-            record(executionId, Map.of("status", "completed", "result", String.valueOf(result)));
+            record(executionId, recordContent
+                    ? Map.of("status", "completed", "result", String.valueOf(result))
+                    : Map.of("status", "completed"));
             return result;
         }
 
@@ -131,9 +150,9 @@ public final class JamjetDurableAgent {
         /** The call threw: keep its error, attach a recording failure as suppressed. */
         private void recordFailure(String executionId, Throwable callError) {
             try {
-                client.sendExternalEvent(executionId, COMPLETED_EVENT, Map.of("status", "failed",
-                        "error", callError.getMessage() != null ? callError.getMessage()
-                                : callError.getClass().getSimpleName()));
+                String error = recordContent && callError.getMessage() != null
+                        ? callError.getMessage() : callError.getClass().getSimpleName();
+                client.sendExternalEvent(executionId, COMPLETED_EVENT, Map.of("status", "failed", "error", error));
             } catch (JamjetClientException e) {
                 if (mode == RuntimeErrorMode.FAIL_OPEN) {
                     log.warn("Could not record the failure of execution {}: {}", executionId, e.getMessage());

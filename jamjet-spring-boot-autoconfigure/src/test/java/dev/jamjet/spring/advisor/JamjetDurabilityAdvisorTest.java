@@ -137,14 +137,14 @@ class JamjetDurabilityAdvisorTest {
     }
 
     @Test
-    void failsClosedWhenTheCompletionCannotBeRecorded() {
+    void failsClosedAsARecordingFailureWhenTheCompletionCannotBeRecorded() {
         runtime.on("POST", "/workflows", 201, "{\"workflow_id\":\"spring-ai-chat\",\"version\":\"1.0.0\"}")
                 .on("POST", "/executions", 201, "{\"execution_id\":\"exec_1\"}")
                 .on("POST", "/executions/exec_1/external-event", 503, "{\"error\":\"unavailable\"}");
         var chat = chatClient(StubChatModel.answering("hello"));
 
         assertThatThrownBy(() -> chat.prompt("hi").call().content())
-                .isInstanceOf(JamjetGovernanceException.class)
+                .isInstanceOf(dev.jamjet.spring.JamjetRecordingException.class)
                 .hasMessageContaining("unavailable");
     }
 

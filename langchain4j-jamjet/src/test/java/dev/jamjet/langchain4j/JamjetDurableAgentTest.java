@@ -107,4 +107,30 @@ class JamjetDurableAgentTest {
 
         assertThat(runtime.getWorkflowCalls()).isZero();
     }
+
+    @Test
+    void aRecordFailureAfterTheCallRanSaysTheCallCompleted() {
+        runtime.setEventsFail(true);
+        var raw = new SimpleAssistant();
+        TestAssistant durable = JamjetDurableAgent.wrap(raw, TestAssistant.class, runtime);
+
+        assertThatThrownBy(() -> durable.answer("test"))
+                .isInstanceOf(dev.jamjet.spring.JamjetRecordingException.class)
+                .hasMessageContaining("call completed")
+                .hasMessageContaining("event store unavailable");
+        assertThat(raw.calls).isEqualTo(1);
+    }
+
+    @Test
+    void whenTheCallFailedAndTheRecordFailsTheCallersErrorIsKept() {
+        runtime.setEventsFail(true);
+        TestAssistant failing = question -> { throw new IllegalStateException("LLM timeout"); };
+        TestAssistant durable = JamjetDurableAgent.wrap(failing, TestAssistant.class, runtime);
+
+        assertThatThrownBy(() -> durable.answer("test"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("LLM timeout")
+                .satisfies(e -> assertThat(e.getSuppressed())
+                        .anySatisfy(x -> assertThat(x).isInstanceOf(dev.jamjet.spring.JamjetRecordingException.class)));
+    }
 }

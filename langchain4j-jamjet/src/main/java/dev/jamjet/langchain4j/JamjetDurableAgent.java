@@ -97,8 +97,7 @@ public final class JamjetDurableAgent {
             try {
                 result = invokeDelegate(method, args);
             } catch (Throwable t) {
-                record(executionId, Map.of("status", "failed",
-                        "error", t.getMessage() != null ? t.getMessage() : t.getClass().getSimpleName()));
+                recordFailure(executionId, t);
                 throw t;
             }
             record(executionId, Map.of("status", "completed", "result", String.valueOf(result)));
@@ -116,11 +115,32 @@ public final class JamjetDurableAgent {
             }
         }
 
+        /** After the call returned: a failure here is a recording failure, never a refusal. */
         private void record(String executionId, Map<String, Object> outcome) {
             try {
                 client.sendExternalEvent(executionId, COMPLETED_EVENT, outcome);
             } catch (JamjetClientException e) {
-                Failures.handle(mode, log, "record the outcome of execution " + executionId, e);
+                if (mode == RuntimeErrorMode.FAIL_OPEN) {
+                    log.warn("The call completed but its outcome could not be recorded: {}", e.getMessage());
+                    return;
+                }
+                throw Failures.recordingFailure("record the outcome of execution " + executionId, e);
+            }
+        }
+
+        /** The call threw: keep its error, attach a recording failure as suppressed. */
+        private void recordFailure(String executionId, Throwable callError) {
+            try {
+                client.sendExternalEvent(executionId, COMPLETED_EVENT, Map.of("status", "failed",
+                        "error", callError.getMessage() != null ? callError.getMessage()
+                                : callError.getClass().getSimpleName()));
+            } catch (JamjetClientException e) {
+                if (mode == RuntimeErrorMode.FAIL_OPEN) {
+                    log.warn("Could not record the failure of execution {}: {}", executionId, e.getMessage());
+                } else {
+                    callError.addSuppressed(Failures.recordingFailure(
+                            "record the failure of execution " + executionId, e));
+                }
             }
         }
 

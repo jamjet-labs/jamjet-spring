@@ -46,6 +46,13 @@ public class JamjetProperties {
      */
     private String workflowId = "spring-ai-chat";
 
+    /**
+     * Allow streaming ChatClient calls in fail-closed mode. Off by default: a
+     * stream's record can only be written after its output was delivered, so a
+     * record failure on a stream is reported after the fact.
+     */
+    private boolean allowStreaming = false;
+
     /** Connection timeout in seconds. */
     private int connectTimeoutSeconds = 10;
 
@@ -115,6 +122,14 @@ public class JamjetProperties {
 
     public void setWorkflowId(String workflowId) {
         this.workflowId = workflowId;
+    }
+
+    public boolean isAllowStreaming() {
+        return allowStreaming;
+    }
+
+    public void setAllowStreaming(boolean allowStreaming) {
+        this.allowStreaming = allowStreaming;
     }
 
     public int getConnectTimeoutSeconds() {

@@ -9,6 +9,10 @@ import org.springframework.ai.chat.client.ChatClientRequest;
 import org.springframework.ai.chat.client.ChatClientResponse;
 import org.springframework.ai.chat.client.advisor.api.AdvisorChain;
 import org.springframework.ai.chat.client.advisor.api.BaseAdvisor;
+import org.springframework.ai.chat.client.advisor.api.StreamAdvisorChain;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 import org.springframework.core.Ordered;
 
 import java.util.LinkedHashMap;
@@ -103,8 +107,45 @@ public class JamjetAuditAdvisor implements BaseAdvisor {
                 putIfNotNull(payload, "total_tokens", usage.getTotalTokens());
             }
         }
-        record(executionId, RESPONSE_EVENT, payload);
+        recordAfterCall(executionId, payload);
         return response;
+    }
+
+    /**
+     * Streaming: records the prompt before the model runs and the whole
+     * streamed text once the stream completes (not only its last chunk).
+     */
+    @Override
+    public Flux<ChatClientResponse> adviseStream(ChatClientRequest request, StreamAdvisorChain chain) {
+        return Mono.fromCallable(() -> before(request, chain))
+                .subscribeOn(Schedulers.boundedElastic())
+                .flatMapMany(advised -> {
+                    String executionId = executionIdOf(advised.context());
+                    if (executionId == null) {
+                        return chain.nextStream(advised);
+                    }
+                    var text = new StringBuffer();
+                    return chain.nextStream(advised)
+                            .doOnNext(r -> text.append(JamjetDurabilityAdvisor.textOf(r)))
+                            .concatWith(Mono.<ChatClientResponse>fromRunnable(() -> {
+                                        var payload = new LinkedHashMap<String, Object>();
+                                        payload.put("advisor", getName());
+                                        payload.put("streamed", true);
+                                        if (properties.getAudit().isIncludeResponses()) {
+                                            payload.put("content", text.toString());
+                                        }
+                                        recordAfterCall(executionId, payload);
+                                    })
+                                    .subscribeOn(Schedulers.boundedElastic()));
+                });
+    }
+
+    private void recordAfterCall(String executionId, Map<String, Object> payload) {
+        try {
+            client.sendExternalEvent(executionId, RESPONSE_EVENT, payload);
+        } catch (JamjetClientException e) {
+            RuntimeErrors.afterCall(properties, log, "record " + RESPONSE_EVENT + " for execution " + executionId, e);
+        }
     }
 
     private void record(String executionId, String key, Map<String, Object> payload) {

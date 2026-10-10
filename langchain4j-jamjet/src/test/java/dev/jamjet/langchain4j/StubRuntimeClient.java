@@ -32,6 +32,11 @@ class StubRuntimeClient extends JamjetRuntimeClient {
     private final List<RecordedEvent> events = Collections.synchronizedList(new ArrayList<>());
     private int workflowCalls;
     private boolean unavailable;
+    private boolean eventsFail;
+
+    void setEventsFail(boolean eventsFail) {
+        this.eventsFail = eventsFail;
+    }
 
     StubRuntimeClient() {
         super(defaultProps());
@@ -106,6 +111,10 @@ class StubRuntimeClient extends JamjetRuntimeClient {
     @Override
     public void sendExternalEvent(String executionId, String correlationKey, Map<String, Object> payload) {
         checkUp("/executions/" + executionId + "/external-event");
+        if (eventsFail) {
+            throw new JamjetClientException(503, "{\"error\":\"event store unavailable\"}",
+                    "/executions/" + executionId + "/external-event");
+        }
         parseExecutionId(executionId, "/executions/" + executionId + "/external-event");
         events.add(new RecordedEvent(executionId, correlationKey, payload));
     }

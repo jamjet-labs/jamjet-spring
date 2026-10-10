@@ -11,6 +11,13 @@ import org.springframework.ai.chat.client.ChatClientResponse;
 import org.springframework.ai.chat.client.advisor.api.AdvisorChain;
 import org.springframework.ai.chat.client.advisor.api.BaseAdvisor;
 import org.springframework.ai.chat.client.advisor.api.CallAdvisorChain;
+import org.springframework.ai.chat.client.advisor.api.StreamAdvisorChain;
+import dev.jamjet.spring.JamjetGovernanceException;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import org.springframework.core.Ordered;
 
 import java.util.LinkedHashMap;
@@ -91,11 +98,68 @@ public class JamjetDurabilityAdvisor implements BaseAdvisor {
         try {
             response = chain.nextCall(advised);
         } catch (RuntimeException e) {
-            recordOutcome(executionId, failure(e));
+            recordModelFailure(executionId, e);
             throw e;
         }
         recordOutcome(executionId, success(response));
         return response;
+    }
+
+    /**
+     * Streaming. In fail-closed mode a stream is refused before the model runs
+     * unless {@code spring.jamjet.allow-streaming=true}, because its record can
+     * only be written after its output was delivered. When it runs, the outcome
+     * is recorded on completion, error and cancel.
+     */
+    @Override
+    public Flux<ChatClientResponse> adviseStream(ChatClientRequest request, StreamAdvisorChain chain) {
+        if (!properties.isDurabilityEnabled()) {
+            return chain.nextStream(request);
+        }
+        if (!properties.isFailOpen() && !properties.isAllowStreaming()) {
+            return Flux.error(new JamjetGovernanceException("Streaming ChatClient calls are refused in "
+                    + "fail-closed mode because their record can only be written after the output was "
+                    + "delivered; set spring.jamjet.allow-streaming=true to allow them", null));
+        }
+        return Mono.fromCallable(() -> before(request, chain))
+                .subscribeOn(Schedulers.boundedElastic())
+                .flatMapMany(advised -> {
+                    String executionId = executionIdOf(advised.context());
+                    var chars = new AtomicLong();
+                    var settled = new AtomicBoolean();
+                    return chain.nextStream(advised)
+                            .doOnNext(r -> chars.addAndGet(textOf(r).length()))
+                            .onErrorResume(err -> Mono.<ChatClientResponse>fromRunnable(() -> {
+                                        if (settled.compareAndSet(false, true) && err instanceof RuntimeException re) {
+                                            recordModelFailure(executionId, re);
+                                        }
+                                    })
+                                    .subscribeOn(Schedulers.boundedElastic())
+                                    .then(Mono.error(err)))
+                            .concatWith(Mono.<ChatClientResponse>fromRunnable(() -> {
+                                        if (settled.compareAndSet(false, true)) {
+                                            var outcome = new LinkedHashMap<String, Object>();
+                                            outcome.put("status", "completed");
+                                            outcome.put("streamed", true);
+                                            outcome.put("chars", chars.get());
+                                            recordOutcome(executionId, outcome);
+                                        }
+                                    })
+                                    .subscribeOn(Schedulers.boundedElastic()))
+                            .doOnCancel(() -> {
+                                if (settled.compareAndSet(false, true) && executionId != null) {
+                                    Schedulers.boundedElastic().schedule(() -> {
+                                        try {
+                                            client.sendExternalEvent(executionId, COMPLETED_EVENT,
+                                                    Map.of("status", "cancelled", "streamed", true));
+                                        } catch (JamjetClientException e) {
+                                            log.warn("Could not record the cancellation of execution {}: {}",
+                                                    executionId, e.getMessage());
+                                        }
+                                    });
+                                }
+                            });
+                });
     }
 
     @Override
@@ -123,12 +187,9 @@ public class JamjetDurabilityAdvisor implements BaseAdvisor {
         }
     }
 
-    /** Used on the streaming path, where Spring AI calls it with the final chunk. */
+    /** Not used: {@link #adviseCall} and {@link #adviseStream} record the outcome themselves. */
     @Override
     public ChatClientResponse after(ChatClientResponse response, AdvisorChain chain) {
-        if (properties.isDurabilityEnabled()) {
-            recordOutcome(executionIdOf(response.context()), success(response));
-        }
         return response;
     }
 
@@ -161,6 +222,7 @@ public class JamjetDurabilityAdvisor implements BaseAdvisor {
 
     // ── Outcome ───────────────────────────────────────────────────────────────
 
+    /** Record the outcome after the model returned. A failure here is reported as a recording failure. */
     private void recordOutcome(String executionId, Map<String, Object> outcome) {
         if (executionId == null) {
             return;
@@ -168,8 +230,38 @@ public class JamjetDurabilityAdvisor implements BaseAdvisor {
         try {
             client.sendExternalEvent(executionId, COMPLETED_EVENT, outcome);
         } catch (JamjetClientException e) {
-            RuntimeErrors.handle(properties, log, "record the outcome of execution " + executionId, e);
+            RuntimeErrors.afterCall(properties, log, "record the outcome of execution " + executionId, e);
         }
+    }
+
+    /**
+     * Record that the model call failed. If that cannot be written either, the
+     * caller still gets the model's own error, with the recording failure
+     * attached as suppressed (fail-closed) or logged (fail-open).
+     */
+    private void recordModelFailure(String executionId, RuntimeException modelError) {
+        if (executionId == null) {
+            return;
+        }
+        try {
+            client.sendExternalEvent(executionId, COMPLETED_EVENT, failure(modelError));
+        } catch (JamjetClientException e) {
+            if (properties.isFailOpen()) {
+                log.warn("Could not record the failure of execution {}: {}", executionId, e.getMessage());
+            } else {
+                modelError.addSuppressed(RuntimeErrors.recordingFailure(
+                        "record the failure of execution " + executionId, e));
+            }
+        }
+    }
+
+    static String textOf(ChatClientResponse response) {
+        if (response == null || response.chatResponse() == null || response.chatResponse().getResult() == null
+                || response.chatResponse().getResult().getOutput() == null) {
+            return "";
+        }
+        String text = response.chatResponse().getResult().getOutput().getText();
+        return text == null ? "" : text;
     }
 
     private static Map<String, Object> success(ChatClientResponse response) {

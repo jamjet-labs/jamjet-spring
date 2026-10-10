@@ -1,6 +1,7 @@
 package dev.jamjet.langchain4j;
 
 import dev.jamjet.spring.JamjetGovernanceException;
+import dev.jamjet.spring.JamjetRecordingException;
 import dev.jamjet.spring.RuntimeErrorMode;
 import dev.jamjet.spring.client.JamjetClientException;
 import org.slf4j.Logger;
@@ -18,5 +19,10 @@ final class Failures {
         }
         throw new JamjetGovernanceException("JamJet runtime could not " + action + ": " + e.getMessage()
                 + " (use RuntimeErrorMode.FAIL_OPEN to continue without the runtime)", e);
+    }
+
+    static JamjetRecordingException recordingFailure(String action, JamjetClientException e) {
+        return new JamjetRecordingException("The call completed but the JamJet runtime could not " + action
+                + ": " + e.getMessage() + ". The call ran; only its record is missing.", e);
     }
 }

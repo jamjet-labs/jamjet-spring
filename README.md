@@ -74,7 +74,15 @@ The model call runs in your JVM. The runtime holds the record: the workflow's si
 
 ## When the runtime is unavailable
 
-By default a call the runtime cannot record is refused: the advisor throws `JamjetGovernanceException` with the runtime's error, and the model is not called. That covers a runtime that is down, a refusal (4xx/5xx), and a `runtime-url` that does not point at the runtime API (any non-JSON answer is an error, never data).
+With the default `spring.jamjet.on-runtime-error=fail-closed`, what happens depends on when the runtime fails:
+
+| When | What fails to record | Result |
+|------|----------------------|--------|
+| Before the model is called | workflow registration, starting the execution, the `spring_ai.prompt` event, the approval request | The call is refused with `JamjetGovernanceException` and the model is not called. |
+| After the model returned | the `spring_ai.response` or `spring_ai.completed` event | `JamjetRecordingException`: the model call completed (any effect has happened) and only its record is missing. The runtime's error is the cause. |
+| After the model threw | the `failed` outcome | The model's own exception, with a `JamjetRecordingException` attached as suppressed. |
+
+A `runtime-url` that does not point at the runtime API counts as a failure: any non-JSON answer is an error, never data.
 
 To let calls run unrecorded instead, opt in:
 
@@ -83,6 +91,16 @@ spring.jamjet.on-runtime-error=fail-open
 ```
 
 Fail-open logs a warning for every call it lets through.
+
+### Streaming
+
+In fail-closed mode a streaming call (`.stream()`) is refused before the model runs unless you allow it:
+
+```properties
+spring.jamjet.allow-streaming=true
+```
+
+An allowed stream records the whole streamed text as `spring_ai.response` and an outcome of `completed`, `failed` or `cancelled`. A stream's record can only be written after its output was delivered, so a fail-closed record failure on a stream arrives as an error at the end of the stream, after the chunks.
 
 ## Human approval
 

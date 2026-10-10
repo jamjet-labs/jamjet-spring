@@ -1,90 +1,110 @@
 package dev.jamjet.langchain4j;
 
+import dev.jamjet.spring.JamjetGovernanceException;
+import dev.jamjet.spring.RuntimeErrorMode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+
+import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class JamjetDurableAgentTest {
 
-    private StubRuntimeClient stub;
+    private StubRuntimeClient runtime;
 
     interface TestAssistant {
         String answer(String question);
     }
 
     static class SimpleAssistant implements TestAssistant {
+        int calls;
+
         @Override
         public String answer(String question) {
+            calls++;
             return "Answer to: " + question;
         }
     }
 
     @BeforeEach
     void setUp() {
-        stub = new StubRuntimeClient();
+        runtime = new StubRuntimeClient();
     }
 
     @Test
     void wrapsInterfaceAndDelegates() {
-        TestAssistant raw = new SimpleAssistant();
-        TestAssistant durable = JamjetDurableAgent.wrap(raw, TestAssistant.class, stub);
+        TestAssistant durable = JamjetDurableAgent.wrap(new SimpleAssistant(), TestAssistant.class, runtime);
 
-        String result = durable.answer("What is Java?");
-
-        assertThat(result).isEqualTo("Answer to: What is Java?");
+        assertThat(durable.answer("What is Java?")).isEqualTo("Answer to: What is Java?");
     }
 
     @Test
-    void recordsExecutionOnSuccess() {
-        TestAssistant raw = new SimpleAssistant();
-        TestAssistant durable = JamjetDurableAgent.wrap(raw, TestAssistant.class, stub);
+    void registersOneValidWorkflowAndRecordsEachCall() {
+        TestAssistant durable = JamjetDurableAgent.wrap(new SimpleAssistant(), TestAssistant.class, runtime);
 
-        durable.answer("test question");
+        durable.answer("first");
+        durable.answer("second");
 
-        assertThat(stub.getWorkflowCount()).isEqualTo(1);
-        assertThat(stub.getExecutionCount()).isEqualTo(1);
-        var events = stub.getEvents();
-        assertThat(events).hasSize(1);
-        assertThat(events.getFirst().correlationKey()).isEqualTo("completion");
-        assertThat(events.getFirst().payload().get("status")).isEqualTo("completed");
+        assertThat(runtime.getWorkflowCalls()).isEqualTo(1);
+        var ir = runtime.registeredIr(JamjetDurableAgent.WORKFLOW_ID);
+        assertThat(ir).containsEntry("version", "1.0.0");
+        assertThat(((Map<?, ?>) ir.get("nodes")).containsKey(ir.get("start_node"))).isTrue();
+        assertThat(ir.get("edges")).isInstanceOf(List.class);
+
+        assertThat(runtime.getExecutionCount()).isEqualTo(2);
+        var events = runtime.getEvents();
+        assertThat(events).hasSize(2).allSatisfy(e -> {
+            assertThat(e.correlationKey()).isEqualTo("langchain4j.completed");
+            assertThat(e.payload()).containsEntry("status", "completed");
+        });
     }
 
     @Test
-    void degradesGracefullyWhenRuntimeUnavailable() {
-        stub.setUnavailable(true);
-        TestAssistant raw = new SimpleAssistant();
-        TestAssistant durable = JamjetDurableAgent.wrap(raw, TestAssistant.class, stub);
+    void failsClosedByDefaultWhenTheRuntimeIsDown() {
+        runtime.setUnavailable(true);
+        var raw = new SimpleAssistant();
+        TestAssistant durable = JamjetDurableAgent.wrap(raw, TestAssistant.class, runtime);
 
-        String result = durable.answer("test");
+        assertThatThrownBy(() -> durable.answer("test"))
+                .isInstanceOf(JamjetGovernanceException.class)
+                .hasMessageContaining("unavailable");
+        assertThat(raw.calls).as("the call never runs unrecorded").isZero();
+    }
 
-        assertThat(result).isEqualTo("Answer to: test");
-        assertThat(stub.getWorkflowCount()).isEqualTo(0);
+    @Test
+    void failOpenRunsTheCallWhenTheRuntimeIsDown() {
+        runtime.setUnavailable(true);
+        TestAssistant durable = JamjetDurableAgent.wrap(new SimpleAssistant(), TestAssistant.class, runtime,
+                RuntimeErrorMode.FAIL_OPEN);
+
+        assertThat(durable.answer("test")).isEqualTo("Answer to: test");
     }
 
     @Test
     void recordsFailureOnException() {
         TestAssistant failing = question -> { throw new RuntimeException("LLM timeout"); };
-        TestAssistant durable = JamjetDurableAgent.wrap(failing, TestAssistant.class, stub);
+        TestAssistant durable = JamjetDurableAgent.wrap(failing, TestAssistant.class, runtime);
 
         assertThatThrownBy(() -> durable.answer("test"))
                 .isInstanceOf(RuntimeException.class)
                 .hasMessage("LLM timeout");
 
-        var events = stub.getEvents();
-        assertThat(events).hasSize(1);
-        assertThat(events.getFirst().payload().get("status")).isEqualTo("failed");
+        assertThat(runtime.getEvents()).singleElement().satisfies(e -> {
+            assertThat(e.correlationKey()).isEqualTo("langchain4j.completed");
+            assertThat(e.payload()).containsEntry("status", "failed");
+        });
     }
 
     @Test
     void objectMethodsPassThrough() {
-        TestAssistant raw = new SimpleAssistant();
-        TestAssistant durable = JamjetDurableAgent.wrap(raw, TestAssistant.class, stub);
+        TestAssistant durable = JamjetDurableAgent.wrap(new SimpleAssistant(), TestAssistant.class, runtime);
 
         durable.toString();
         durable.hashCode();
 
-        assertThat(stub.getWorkflowCount()).isEqualTo(0);
+        assertThat(runtime.getWorkflowCalls()).isZero();
     }
 }

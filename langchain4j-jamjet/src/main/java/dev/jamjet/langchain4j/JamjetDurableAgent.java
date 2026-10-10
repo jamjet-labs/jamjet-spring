@@ -1,7 +1,9 @@
 package dev.jamjet.langchain4j;
 
+import dev.jamjet.spring.RuntimeErrorMode;
 import dev.jamjet.spring.client.JamjetClientException;
 import dev.jamjet.spring.client.JamjetRuntimeClient;
+import dev.jamjet.spring.client.RecordedCallWorkflow;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -10,30 +12,62 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
+/**
+ * Wraps a LangChain4j AI service so every method call is recorded as an
+ * execution on the JamJet runtime: the {@code langchain4j-durable-agent}
+ * workflow is registered once, each call starts an execution of it, and a
+ * {@code langchain4j.completed} external event records the outcome.
+ *
+ * <p>The call itself runs in this JVM; the runtime holds the record. By default
+ * a call the runtime cannot record is refused
+ * ({@link dev.jamjet.spring.JamjetGovernanceException}); pass
+ * {@link RuntimeErrorMode#FAIL_OPEN} to run it anyway.
+ */
 public final class JamjetDurableAgent {
+
+    /** Workflow id every wrapped call runs under. */
+    public static final String WORKFLOW_ID = "langchain4j-durable-agent";
+
+    /** Correlation key of the outcome event. */
+    public static final String COMPLETED_EVENT = "langchain4j.completed";
 
     private JamjetDurableAgent() {}
 
-    @SuppressWarnings("unchecked")
+    /** Wrap with the default, fail-closed error mode. */
     public static <T> T wrap(T aiService, Class<T> iface, JamjetRuntimeClient client) {
+        return wrap(aiService, iface, client, RuntimeErrorMode.FAIL_CLOSED);
+    }
+
+    @SuppressWarnings("unchecked")
+    public static <T> T wrap(T aiService, Class<T> iface, JamjetRuntimeClient client, RuntimeErrorMode mode) {
         return (T) Proxy.newProxyInstance(
                 iface.getClassLoader(),
                 new Class<?>[]{ iface },
-                new DurabilityHandler<>(aiService, client));
+                new DurabilityHandler<>(aiService, client, mode == null ? RuntimeErrorMode.FAIL_CLOSED : mode));
+    }
+
+    static Map<String, Object> workflowIr() {
+        return RecordedCallWorkflow.ir(WORKFLOW_ID, "invoke", COMPLETED_EVENT,
+                "LangChain4j AI service call", "langchain4j-jamjet");
     }
 
     private static class DurabilityHandler<T> implements InvocationHandler {
 
-        private static final Logger log = LoggerFactory.getLogger(DurabilityHandler.class);
+        private static final Logger log = LoggerFactory.getLogger(JamjetDurableAgent.class);
 
         private final T delegate;
         private final JamjetRuntimeClient client;
+        private final RuntimeErrorMode mode;
+        private volatile boolean registered;
 
-        DurabilityHandler(T delegate, JamjetRuntimeClient client) {
+        DurabilityHandler(T delegate, JamjetRuntimeClient client, RuntimeErrorMode mode) {
             this.delegate = delegate;
             this.client = client;
+            this.mode = mode;
         }
 
         @Override
@@ -42,57 +76,65 @@ public final class JamjetDurableAgent {
                 return method.invoke(delegate, args);
             }
 
-            String executionId;
+            String executionId = null;
             try {
-                var ir = buildIr(method);
-                var wfResp = client.createWorkflow(ir);
-                var execResp = client.startExecution(wfResp.workflowId(), null,
-                        Map.of("method", method.getName(),
-                               "args", args != null ? Arrays.stream(args).map(String::valueOf).toList() : java.util.List.of()));
-                executionId = execResp.executionId();
+                ensureRegistered();
+                var input = new LinkedHashMap<String, Object>();
+                input.put("interface", method.getDeclaringClass().getName());
+                input.put("method", method.getName());
+                input.put("args", args != null ? Arrays.stream(args).map(String::valueOf).toList() : List.of());
+                var started = client.startExecution(WORKFLOW_ID, RecordedCallWorkflow.VERSION, input);
+                executionId = started != null ? started.executionId() : null;
+                if (executionId == null || executionId.isBlank()) {
+                    throw new JamjetClientException("the runtime returned no execution_id", "/executions");
+                }
             } catch (JamjetClientException e) {
-                log.warn("JamJet runtime unavailable, proceeding without durability: {}", e.getMessage());
+                Failures.handle(mode, log, "start an execution for " + method.getName(), e);
                 return invokeDelegate(method, args);
             }
 
+            Object result;
             try {
-                Object result = invokeDelegate(method, args);
-
-                try {
-                    client.sendExternalEvent(executionId, "completion",
-                            Map.of("status", "completed", "result", String.valueOf(result)));
-                } catch (JamjetClientException e) {
-                    log.warn("Failed to record completion for execution {}: {}", executionId, e.getMessage());
-                }
-
-                return result;
+                result = invokeDelegate(method, args);
             } catch (Throwable t) {
-                try {
-                    client.sendExternalEvent(executionId, "completion",
-                            Map.of("status", "failed", "error", t.getMessage() != null ? t.getMessage() : t.getClass().getSimpleName()));
-                } catch (JamjetClientException e) {
-                    log.warn("Failed to record failure for execution {}: {}", executionId, e.getMessage());
-                }
+                record(executionId, Map.of("status", "failed",
+                        "error", t.getMessage() != null ? t.getMessage() : t.getClass().getSimpleName()));
                 throw t;
+            }
+            record(executionId, Map.of("status", "completed", "result", String.valueOf(result)));
+            return result;
+        }
+
+        private void ensureRegistered() {
+            if (!registered) {
+                synchronized (this) {
+                    if (!registered) {
+                        client.createWorkflow(workflowIr());
+                        registered = true;
+                    }
+                }
+            }
+        }
+
+        private void record(String executionId, Map<String, Object> outcome) {
+            try {
+                client.sendExternalEvent(executionId, COMPLETED_EVENT, outcome);
+            } catch (JamjetClientException e) {
+                Failures.handle(mode, log, "record the outcome of execution " + executionId, e);
             }
         }
 
         private Object invokeDelegate(Method method, Object[] args) throws Throwable {
             try {
+                if (!method.canAccess(delegate)) {
+                    // A non-public service interface (or a lambda implementing one)
+                    // is not reachable from this package without it.
+                    method.setAccessible(true);
+                }
                 return method.invoke(delegate, args);
             } catch (InvocationTargetException e) {
                 throw e.getCause();
             }
-        }
-
-        private Map<String, Object> buildIr(Method method) {
-            String name = "langchain4j-" + method.getDeclaringClass().getSimpleName() + "-" + method.getName();
-            return Map.of(
-                    "name", name,
-                    "version", "1",
-                    "nodes", Map.of("invoke", Map.of("kind", "LlmGenerate", "method", method.getName())),
-                    "edges", Map.of(),
-                    "entry_node", "invoke");
         }
     }
 }

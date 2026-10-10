@@ -1,6 +1,7 @@
 package dev.jamjet.langchain4j;
 
 import dev.jamjet.spring.JamjetProperties;
+import dev.jamjet.spring.RuntimeErrorMode;
 import dev.jamjet.spring.client.JamjetRuntimeClient;
 
 public class JamjetConfig {
@@ -10,6 +11,7 @@ public class JamjetConfig {
     private String tenantId = "default";
     private int connectTimeoutSeconds = 10;
     private int readTimeoutSeconds = 120;
+    private RuntimeErrorMode onRuntimeError = RuntimeErrorMode.FAIL_CLOSED;
 
     public JamjetConfig runtimeUrl(String url) {
         this.runtimeUrl = url;
@@ -36,6 +38,26 @@ public class JamjetConfig {
         return this;
     }
 
+    /**
+     * What wrapped agents and the memory store do when the runtime cannot record
+     * a call: {@link RuntimeErrorMode#FAIL_CLOSED} (default) throws,
+     * {@link RuntimeErrorMode#FAIL_OPEN} logs and continues.
+     */
+    public JamjetConfig onRuntimeError(RuntimeErrorMode mode) {
+        this.onRuntimeError = mode == null ? RuntimeErrorMode.FAIL_CLOSED : mode;
+        return this;
+    }
+
+    /** Wrap an AI service with this config's client and error mode. */
+    public <T> T wrap(T aiService, Class<T> iface) {
+        return JamjetDurableAgent.wrap(aiService, iface, buildClient(), onRuntimeError);
+    }
+
+    /** A chat memory store with this config's client and error mode. */
+    public JamjetChatMemoryStore chatMemoryStore() {
+        return new JamjetChatMemoryStore(buildClient(), onRuntimeError);
+    }
+
     public JamjetRuntimeClient buildClient() {
         var props = new JamjetProperties();
         props.setRuntimeUrl(runtimeUrl);
@@ -43,6 +65,7 @@ public class JamjetConfig {
         props.setTenantId(tenantId);
         props.setConnectTimeoutSeconds(connectTimeoutSeconds);
         props.setReadTimeoutSeconds(readTimeoutSeconds);
+        props.setOnRuntimeError(onRuntimeError);
         return new JamjetRuntimeClient(props);
     }
 
@@ -51,4 +74,5 @@ public class JamjetConfig {
     public String getTenantId() { return tenantId; }
     public int getConnectTimeoutSeconds() { return connectTimeoutSeconds; }
     public int getReadTimeoutSeconds() { return readTimeoutSeconds; }
+    public RuntimeErrorMode getOnRuntimeError() { return onRuntimeError; }
 }

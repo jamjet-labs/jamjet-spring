@@ -232,6 +232,17 @@ public class JamjetProperties {
         @Deprecated
         private String defaultDecision = "rejected";
 
+        /** Accept a remember-me login as a reviewer. Off: a reviewer must have signed in this session. */
+        private boolean allowRememberMe = false;
+
+        public boolean isAllowRememberMe() {
+            return allowRememberMe;
+        }
+
+        public void setAllowRememberMe(boolean allowRememberMe) {
+            this.allowRememberMe = allowRememberMe;
+        }
+
         /** The approval REST endpoints ({@code spring.jamjet.approval.controller.*}). */
         private Controller controller = new Controller();
 

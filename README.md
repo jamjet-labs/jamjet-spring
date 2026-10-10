@@ -132,7 +132,7 @@ curl -u reviewer:secret -X POST http://localhost:8080/jamjet/approvals/{executio
 
 **A decision is bound to what was reviewed.** `/pending` shows each call's prompt (escaped and cut at 2000 characters) and a `content_digest` over every message of the prompt. A decision must echo that digest: without it the answer is 400, with a different one 409, and nothing is recorded. The approval advisor runs last before the model, so no other advisor can change the prompt after it was approved. Only one decision applies to a call: a second or late one gets 409 and records nothing.
 
-**Reviewers must be authenticated.** The approver recorded on the runtime is the authenticated principal of the request; the body cannot name it, and a request with no principal gets 401 and releases nothing. The principal that triggered a call, when Spring Security knows it at call time, cannot approve that call (403). The endpoints are registered only when Spring Security is on the classpath. Protect them with a role, for example:
+**Reviewers must be authenticated.** The approver recorded on the runtime is the authenticated principal of the request; the body cannot name it. A request with no principal, an anonymous authentication, or an authentication that is not authenticated gets 401 and releases nothing. A remember-me login is refused too unless `spring.jamjet.approval.allow-remember-me=true`, so a reviewer must have signed in this session. The principal that triggered a call, when Spring Security knows it at call time, cannot approve that call (403). The endpoints are registered only when Spring Security is on the classpath. Protect them with a role, for example:
 
 ```java
 @Bean
@@ -169,6 +169,7 @@ A call marked as requiring approval never runs ungated: `JamjetApprovalGuard` is
 | `spring.jamjet.approval.enabled` | `false` | Add the approval advisor and endpoints |
 | `spring.jamjet.approval.timeout` | `30m` | How long a call waits for a decision (`500ms`, `30s`, `30m`, `2h`, ISO-8601; a bare number is minutes) |
 | `spring.jamjet.approval.default-decision` | `rejected` | Deprecated. A timed-out call is always rejected; any other value fails at startup |
+| `spring.jamjet.approval.allow-remember-me` | `false` | Accept a remember-me login as a reviewer |
 | `spring.jamjet.approval.controller.allow-unauthenticated` | `false` | Register the approval endpoints without Spring Security (local development only) |
 | `spring.jamjet.connect-timeout-seconds` | `10` | Connection timeout |
 | `spring.jamjet.read-timeout-seconds` | `120` | Read timeout |

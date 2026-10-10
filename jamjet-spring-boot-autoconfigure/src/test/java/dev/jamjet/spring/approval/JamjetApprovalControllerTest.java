@@ -173,7 +173,7 @@ class JamjetApprovalControllerTest {
     @Test
     void unauthenticatedDecisionsAreRecordedAsSuchWhenExplicitlyAllowed() throws Exception {
         runtime.on("POST", EVENTS, 200, "{\"accepted\":true}");
-        var open = new JamjetApprovalController(client, registry, true);
+        var open = new JamjetApprovalController(client, registry, ReviewPolicy.defaults().withAllowUnauthenticated(true));
         var call = parkedCall(null);
 
         var resp = open.handleApproval("exec_1", approved(), null);

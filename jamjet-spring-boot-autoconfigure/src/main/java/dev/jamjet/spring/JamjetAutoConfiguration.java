@@ -5,6 +5,7 @@ import dev.jamjet.spring.advisor.JamjetAuditAdvisor;
 import dev.jamjet.spring.advisor.JamjetDurabilityAdvisor;
 import dev.jamjet.spring.approval.ApprovalWaitRegistry;
 import dev.jamjet.spring.approval.JamjetApprovalController;
+import dev.jamjet.spring.approval.ReviewPolicy;
 import dev.jamjet.spring.audit.JamjetAuditService;
 import dev.jamjet.spring.client.JamjetRuntimeClient;
 import org.slf4j.Logger;
@@ -155,7 +156,9 @@ public class JamjetAutoConfiguration {
                     + "/jamjet/approvals can approve this application's calls. Use this for local development only.");
         }
         log.info("Registering JamJet approval REST controller at /jamjet/approvals");
-        return new JamjetApprovalController(client, waitRegistry, open);
+        return new JamjetApprovalController(client, waitRegistry, ReviewPolicy.defaults()
+                .withAllowUnauthenticated(open)
+                .withAllowRememberMe(properties.getApproval().isAllowRememberMe()));
     }
 
     /** Spring Security present, or unauthenticated decisions explicitly allowed. */

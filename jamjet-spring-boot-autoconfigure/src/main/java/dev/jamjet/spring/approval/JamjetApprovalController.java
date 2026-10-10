@@ -69,17 +69,17 @@ public class JamjetApprovalController {
 
     private final JamjetRuntimeClient client;
     private final ApprovalWaitRegistry waitRegistry;
-    private final boolean allowUnauthenticated;
+    private final ReviewPolicy policy;
 
     public JamjetApprovalController(JamjetRuntimeClient client, ApprovalWaitRegistry waitRegistry) {
-        this(client, waitRegistry, false);
+        this(client, waitRegistry, ReviewPolicy.defaults());
     }
 
     public JamjetApprovalController(JamjetRuntimeClient client, ApprovalWaitRegistry waitRegistry,
-                                    boolean allowUnauthenticated) {
+                                    ReviewPolicy policy) {
         this.client = client;
         this.waitRegistry = waitRegistry;
-        this.allowUnauthenticated = allowUnauthenticated;
+        this.policy = policy == null ? ReviewPolicy.defaults() : policy;
     }
 
     @PostMapping("/{executionId}")
@@ -88,12 +88,12 @@ public class JamjetApprovalController {
             @RequestBody ReviewDecision decision,
             Principal principal) {
 
-        String approver = principal == null || principal.getName() == null || principal.getName().isBlank()
-                ? null : principal.getName();
-        if (approver == null && !allowUnauthenticated) {
-            return error(HttpStatus.UNAUTHORIZED, executionId,
-                    "an authenticated reviewer is required to decide an approval", null);
+        var reviewer = Reviewers.check(principal, policy);
+        if (!reviewer.accepted()) {
+            return error(HttpStatus.valueOf(reviewer.status()), executionId, reviewer.reason(), null);
         }
+        boolean authenticated = !policy.allowUnauthenticated() || principal != null;
+        String approver = reviewer.name();
         if (decision == null || !("approved".equals(decision.decision())
                 || "rejected".equals(decision.decision()))) {
             return error(HttpStatus.BAD_REQUEST, executionId,
@@ -115,7 +115,7 @@ public class JamjetApprovalController {
             return error(HttpStatus.CONFLICT, executionId, "content_digest does not match the waiting call; "
                     + "re-read GET /jamjet/approvals/pending and decide again", null);
         }
-        if (approver != null && approver.equals(waiting.initiator()) && "approved".equals(decision.decision())) {
+        if (approver.equals(waiting.initiator()) && "approved".equals(decision.decision())) {
             return error(HttpStatus.FORBIDDEN, executionId,
                     "separation of duties: " + approver + " triggered this call and cannot approve it", null);
         }
@@ -126,13 +126,13 @@ public class JamjetApprovalController {
                             + "nothing was recorded", null);
         }
 
-        String recordedApprover = approver != null ? approver : UNAUTHENTICATED;
+        String recordedApprover = approver;
         log.info("Received {} for execution {} from {}", decision.decision(), executionId, recordedApprover);
         try {
             var payload = new LinkedHashMap<String, Object>();
             payload.put("decision", decision.decision());
             payload.put("approver", recordedApprover);
-            payload.put("authenticated", approver != null);
+            payload.put("authenticated", authenticated);
             if (waiting.initiator() != null) {
                 payload.put("initiator", waiting.initiator());
             }

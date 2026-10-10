@@ -1,5 +1,6 @@
 package dev.jamjet.spring.approval;
 
+import dev.jamjet.spring.JamjetProperties;
 import dev.jamjet.spring.client.model.ApprovalDecision;
 
 import java.time.Duration;
@@ -43,7 +44,18 @@ public class ApprovalWaitRegistry {
      * decision that was already being recorded when it fired. The advisor passes
      * one derived from the client's own timeouts.
      */
-    static final Duration DEFAULT_DECIDING_GRACE = Duration.ofSeconds(140);
+    static final Duration DEFAULT_DECIDING_GRACE = decidingGrace(new JamjetProperties());
+
+    /**
+     * How long a call whose timeout fired keeps waiting for a decision that was
+     * already being recorded: longer than the client can take to record it
+     * (connect plus read timeout), plus a margin. The one place this is defined.
+     */
+    public static Duration decidingGrace(JamjetProperties properties) {
+        return Duration.ofSeconds(properties.getConnectTimeoutSeconds())
+                .plusSeconds(properties.getReadTimeoutSeconds())
+                .plusSeconds(10);
+    }
 
     private final ConcurrentHashMap<String, Waiter> pending = new ConcurrentHashMap<>();
 

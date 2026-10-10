@@ -97,9 +97,7 @@ public class JamjetApprovalAdvisor implements BaseAdvisor {
      * (connect plus read timeout), plus a margin.
      */
     public static Duration decidingGrace(JamjetProperties properties) {
-        return Duration.ofSeconds(properties.getConnectTimeoutSeconds())
-                .plusSeconds(properties.getReadTimeoutSeconds())
-                .plusSeconds(10);
+        return ApprovalWaitRegistry.decidingGrace(properties);
     }
 
     @Override

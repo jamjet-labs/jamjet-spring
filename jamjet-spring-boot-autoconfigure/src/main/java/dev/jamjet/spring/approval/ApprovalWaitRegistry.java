@@ -3,60 +3,75 @@ package dev.jamjet.spring.approval;
 import dev.jamjet.spring.client.model.ApprovalDecision;
 
 import java.time.Duration;
+import java.time.Instant;
+import java.util.Comparator;
 import java.util.List;
-import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 /**
- * Registry tracking pending approval requests. The advisor blocks on
- * {@link #waitForApproval}, and the controller calls {@link #complete}
- * when a decision arrives.
+ * Registry of ChatClient calls paused for approval. The advisor blocks on
+ * {@link #waitForApproval}; the controller calls {@link #complete} when a
+ * decision arrives.
+ *
+ * <p>A decision delivered after the waiter registered but before it started
+ * blocking is not lost: each wait is a {@link CompletableFuture}, so
+ * {@link #complete} succeeds whenever a waiter is registered.
  */
 public class ApprovalWaitRegistry {
 
-    private final ConcurrentHashMap<String, SynchronousQueue<ApprovalDecision>> pending =
-            new ConcurrentHashMap<>();
+    private record Waiter(CompletableFuture<ApprovalDecision> decision, Instant since) {}
+
+    private final ConcurrentHashMap<String, Waiter> pending = new ConcurrentHashMap<>();
 
     /**
-     * Block the current thread until an approval decision is received
-     * for the given execution, or the timeout elapses.
+     * Block the current thread until a decision is received for the given
+     * execution, or the timeout elapses.
      */
     public ApprovalDecision waitForApproval(String executionId, Duration timeout)
             throws TimeoutException, InterruptedException {
-        var queue = pending.computeIfAbsent(executionId, k -> new SynchronousQueue<>());
+        var waiter = pending.computeIfAbsent(executionId,
+                k -> new Waiter(new CompletableFuture<>(), Instant.now()));
         try {
-            ApprovalDecision decision = queue.poll(timeout.toMillis(), TimeUnit.MILLISECONDS);
-            if (decision == null) {
-                throw new TimeoutException("Approval timed out for execution " + executionId);
-            }
-            return decision;
+            return waiter.decision().get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            throw new TimeoutException("Approval timed out for execution " + executionId);
+        } catch (ExecutionException e) {
+            throw new IllegalStateException("Approval wait failed for execution " + executionId, e.getCause());
         } finally {
-            pending.remove(executionId);
+            pending.remove(executionId, waiter);
         }
     }
 
     /**
-     * Complete a pending approval request. Called by the approval controller
-     * when a webhook callback is received.
+     * Deliver a decision to the call waiting on this execution.
+     *
+     * @return false if no call is waiting
      */
     public boolean complete(String executionId, ApprovalDecision decision) {
-        var queue = pending.get(executionId);
-        if (queue == null) {
+        var waiter = pending.get(executionId);
+        if (waiter == null) {
             return false;
         }
-        return queue.offer(decision);
+        return waiter.decision().complete(decision);
     }
 
-    /** List all execution IDs currently waiting for approval. */
+    /** True if a call is waiting for a decision on this execution. */
+    public boolean isPending(String executionId) {
+        return pending.containsKey(executionId);
+    }
+
+    /** All calls currently waiting, oldest first. */
     public List<PendingApproval> allPending() {
-        return pending.keySet().stream()
-                .map(id -> new PendingApproval(id))
+        return pending.entrySet().stream()
+                .map(e -> new PendingApproval(e.getKey(), e.getValue().since()))
+                .sorted(Comparator.comparing(PendingApproval::waitingSince))
                 .toList();
     }
 
-    public record PendingApproval(String executionId) {
+    public record PendingApproval(String executionId, Instant waitingSince) {
     }
 }

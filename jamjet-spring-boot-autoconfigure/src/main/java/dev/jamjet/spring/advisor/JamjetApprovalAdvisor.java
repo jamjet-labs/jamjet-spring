@@ -14,6 +14,7 @@ import org.springframework.ai.chat.client.ChatClientResponse;
 import org.springframework.core.Ordered;
 
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.concurrent.TimeoutException;
 
 /**
@@ -22,11 +23,15 @@ import java.util.concurrent.TimeoutException;
  *
  * <p>When enabled, the advisor:
  * <ol>
- *   <li>Registers the execution as pending approval</li>
- *   <li>Optionally sends a webhook notification</li>
- *   <li>Blocks (with configurable timeout) until approval is received</li>
- *   <li>On approval → continues the chain; on rejection → throws exception</li>
+ *   <li>Records a {@code spring_ai.approval_requested} event on the call's execution</li>
+ *   <li>Blocks (with configurable timeout) until a decision is received</li>
+ *   <li>On an explicit {@code "approved"}, continues the chain; on anything else, or
+ *       on timeout with the default decision {@code rejected}, throws
+ *       {@link ApprovalRejectedException}</li>
  * </ol>
+ *
+ * <p>A call that requires approval but has no execution id (durability disabled, or
+ * the runtime failed open) is rejected, never run unapproved.
  *
  * <p>Approvals are received via the {@code /jamjet/approvals/{executionId}} endpoint
  * (see {@link dev.jamjet.spring.approval.JamjetApprovalController}).
@@ -37,6 +42,9 @@ public class JamjetApprovalAdvisor implements BaseAdvisor {
 
     /** Context key to explicitly require approval for a request. */
     public static final String REQUIRES_APPROVAL_KEY = "jamjet.approval.required";
+
+    /** Correlation key of the event recording that a call is waiting for approval. */
+    public static final String REQUESTED_EVENT = "spring_ai.approval_requested";
 
     private final JamjetRuntimeClient client;
     private final JamjetProperties properties;
@@ -67,20 +75,34 @@ public class JamjetApprovalAdvisor implements BaseAdvisor {
             return request;
         }
 
-        String executionId = (String) request.context().get(JamjetDurabilityAdvisor.EXECUTION_ID_KEY);
-        if (executionId == null) {
-            log.warn("Approval required but no execution ID in context — skipping");
-            return request;
+        Object id = request.context().get(JamjetDurabilityAdvisor.EXECUTION_ID_KEY);
+        if (!(id instanceof String executionId) || executionId.isBlank()) {
+            // Without an execution there is nothing a reviewer can approve. Skipping
+            // the gate would run a call that was marked as needing approval.
+            throw new ApprovalRejectedException(null,
+                    "approval is required but the call has no JamJet execution to approve against "
+                            + "(is the durability advisor enabled and recording?)");
         }
 
-        log.info("Execution {} paused — waiting for human approval", executionId);
+        try {
+            var payload = new LinkedHashMap<String, Object>();
+            payload.put("advisor", getName());
+            payload.put("timeout", properties.getApproval().getTimeout());
+            client.sendExternalEvent(executionId, REQUESTED_EVENT, payload);
+        } catch (JamjetClientException e) {
+            RuntimeErrors.handle(properties, log, "record the approval request for execution " + executionId, e);
+        }
+
+        log.info("Execution {} paused, waiting for human approval", executionId);
 
         try {
             Duration timeout = parseTimeout(properties.getApproval().getTimeout());
             ApprovalDecision decision = waitRegistry.waitForApproval(executionId, timeout);
 
-            if ("rejected".equalsIgnoreCase(decision.decision())) {
-                throw new ApprovalRejectedException(executionId, decision.comment());
+            // Only an explicit "approved" lets the call through.
+            if (decision == null || !decision.isApproved()) {
+                throw new ApprovalRejectedException(executionId,
+                        decision == null ? "no decision" : decision.comment());
             }
 
             log.info("Execution {} approved by {}", executionId,
@@ -89,18 +111,18 @@ public class JamjetApprovalAdvisor implements BaseAdvisor {
 
         } catch (TimeoutException e) {
             String defaultDecision = properties.getApproval().getDefaultDecision();
-            log.warn("Approval timed out for execution {} — applying default: {}",
+            log.warn("Approval timed out for execution {}, applying default: {}",
                     executionId, defaultDecision);
 
-            if ("rejected".equalsIgnoreCase(defaultDecision)) {
+            if (!"approved".equalsIgnoreCase(defaultDecision)) {
                 throw new ApprovalRejectedException(executionId,
-                        "Approval timed out, default decision: rejected");
+                        "Approval timed out, default decision: " + defaultDecision);
             }
             return request;
 
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new JamjetClientException("Approval wait interrupted for " + executionId, e);
+            throw new ApprovalRejectedException(executionId, "approval wait interrupted");
         }
     }
 

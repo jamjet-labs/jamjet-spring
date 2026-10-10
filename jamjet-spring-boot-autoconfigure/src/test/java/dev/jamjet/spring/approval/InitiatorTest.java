@@ -196,4 +196,72 @@ class InitiatorTest {
         assertThat(JSON.readTree(decision.body()).get("payload").get("initiator_known").asBoolean()).isFalse();
         assertThat(waiting.get(5, TimeUnit.SECONDS).isApproved()).isTrue();
     }
+
+    // ── A caller cannot name the initiator (ported from the round-3 probe P1) ──
+
+    private ChatClient.ChatClientRequestSpec forged(ChatClient chat) {
+        return chat.prompt("wire 100").advisors(a -> a.param(JamjetApprovalAdvisor.REQUIRES_APPROVAL_KEY, true)
+                .param(JamjetDurabilityAdvisor.EXECUTION_ID_KEY, "exec_1")
+                .param(JamjetApprovalAdvisor.INITIATOR_KEY, "somebody-else"));
+    }
+
+    @Test
+    void aCallerSuppliedInitiatorIsIgnoredWithTheGuard() throws Exception {
+        var chat = ChatClient.builder(StubChatModel.answering("wire sent")).defaultAdvisors(
+                new JamjetApprovalGuard(), new JamjetApprovalAdvisor(client, props, registry)).build();
+
+        var call = CompletableFuture.supplyAsync(() -> as("carol", () -> forged(chat).call().content()));
+        awaitPending();
+
+        assertThat(registry.context("exec_1").initiator()).isEqualTo("carol");
+        assertThat(approveAs("carol")).isEqualTo(403);
+        assertThat(approveAs("dave")).isEqualTo(200);
+        call.get(5, TimeUnit.SECONDS);
+    }
+
+    @Test
+    void aCallerSuppliedInitiatorIsIgnoredWithoutTheGuard() throws Exception {
+        var chat = ChatClient.builder(StubChatModel.answering("wire sent"))
+                .defaultAdvisors(new JamjetApprovalAdvisor(client, props, registry)).build();
+
+        var call = CompletableFuture.supplyAsync(() -> as("carol", () -> forged(chat).call().content()));
+        awaitPending();
+
+        assertThat(registry.context("exec_1").initiator()).isEqualTo("carol");
+        assertThat(approveAs("carol")).isEqualTo(403);
+        assertThat(approveAs("dave")).isEqualTo(200);
+        call.get(5, TimeUnit.SECONDS);
+    }
+
+    @Test
+    void aCallerSuppliedInitiatorIsIgnoredOnAStream() throws Exception {
+        var chat = ChatClient.builder(StubChatModel.answering("wire sent"))
+                .defaultAdvisors(new JamjetApprovalAdvisor(client, props, registry)).build();
+
+        var call = CompletableFuture.supplyAsync(() -> as("carol",
+                () -> String.join("", forged(chat).stream().content().collectList().block())));
+        awaitPending();
+
+        assertThat(registry.context("exec_1").initiator()).isEqualTo("carol");
+        assertThat(approveAs("carol")).isEqualTo(403);
+        assertThat(approveAs("dave")).isEqualTo(200);
+        call.get(5, TimeUnit.SECONDS);
+    }
+
+    @Test
+    void aForgedInitiatorDoesNotFillInAnUnknownOne() throws Exception {
+        var chat = ChatClient.builder(StubChatModel.answering("wire sent")).defaultAdvisors(
+                new JamjetApprovalGuard(), new JamjetApprovalAdvisor(client, props, registry)).build();
+
+        var call = CompletableFuture.supplyAsync(() -> forged(chat).call().content());
+        awaitPending();
+
+        assertThat(registry.context("exec_1").initiator()).as("no SecurityContext: unknown, not the param").isNull();
+        registry.complete("exec_1", ApprovalDecision.rejected("t", null));
+        try {
+            call.get(5, TimeUnit.SECONDS);
+        } catch (Exception expected) {
+            // rejected
+        }
+    }
 }

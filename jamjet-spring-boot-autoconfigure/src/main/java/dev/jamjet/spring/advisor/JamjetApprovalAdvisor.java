@@ -51,7 +51,8 @@ public class JamjetApprovalAdvisor implements BaseAdvisor {
 
     /**
      * Context key carrying the principal that triggered the call, captured on the
-     * caller's thread (or from the Reactor context) before any thread hop.
+     * caller's thread (or from the Reactor context) before any thread hop. Only a
+     * value JamJet captured counts; a caller-supplied param here is ignored.
      */
     public static final String INITIATOR_KEY = "jamjet.approval.initiator";
 
@@ -177,7 +178,7 @@ public class JamjetApprovalAdvisor implements BaseAdvisor {
      */
     @Override
     public Flux<ChatClientResponse> adviseStream(ChatClientRequest request, StreamAdvisorChain chain) {
-        if (!requiresApproval(request) || request.context().get(INITIATOR_KEY) instanceof String) {
+        if (!requiresApproval(request) || request.context().get(INITIATOR_KEY) instanceof CapturedInitiator) {
             return BaseAdvisor.super.adviseStream(request, chain);
         }
         String onThisThread = CurrentPrincipal.name();
@@ -187,22 +188,35 @@ public class JamjetApprovalAdvisor implements BaseAdvisor {
                                 : reactive.isEmpty() ? null : reactive), chain));
     }
 
-    /** The captured initiator, or the current thread's principal when none was captured. */
+    /**
+     * The initiator JamJet captured, or the current thread's principal when none
+     * was captured. Anything else under {@link #INITIATOR_KEY} was set by the caller
+     * and is ignored: only the security context names the initiator.
+     */
     static String initiatorOf(java.util.Map<String, Object> context) {
         Object captured = context == null ? null : context.get(INITIATOR_KEY);
-        if (captured instanceof String s && !s.isBlank()) {
-            return s;
+        if (captured instanceof CapturedInitiator c) {
+            return c.name();
+        }
+        if (captured != null) {
+            log.warn("Ignoring a caller-supplied {} param: the initiator is taken from the security context only",
+                    INITIATOR_KEY);
         }
         return CurrentPrincipal.name();
     }
 
-    /** The request with the initiator in its context, unless one is already there or none is known. */
-    public static ChatClientRequest withInitiator(ChatClientRequest request, String initiator) {
-        if (initiator == null || request.context().get(INITIATOR_KEY) instanceof String) {
-            return request;
+    /**
+     * The request carrying the captured initiator, always overwriting whatever was
+     * under {@link #INITIATOR_KEY}. {@code initiator} null records it as unknown.
+     */
+    static ChatClientRequest withInitiator(ChatClientRequest request, String initiator) {
+        if (request.context().get(INITIATOR_KEY) != null
+                && !(request.context().get(INITIATOR_KEY) instanceof CapturedInitiator)) {
+            log.warn("Ignoring a caller-supplied {} param: the initiator is taken from the security context only",
+                    INITIATOR_KEY);
         }
         var context = new java.util.LinkedHashMap<>(request.context());
-        context.put(INITIATOR_KEY, initiator);
+        context.put(INITIATOR_KEY, new CapturedInitiator(initiator));
         return request.mutate().context(context).build();
     }
 

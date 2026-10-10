@@ -168,7 +168,7 @@ A call marked as requiring approval never runs ungated: `JamjetApprovalGuard` is
 | `spring.jamjet.audit.include-prompts` | `true` | Record prompt text |
 | `spring.jamjet.audit.include-responses` | `true` | Record response text and token usage |
 | `spring.jamjet.approval.enabled` | `false` | Add the approval advisor and endpoints |
-| `spring.jamjet.approval.timeout` | `30m` | How long a call waits for a decision |
+| `spring.jamjet.approval.timeout` | `30m` | How long a call waits for a decision (`500ms`, `30s`, `30m`, `2h`, ISO-8601; a bare number is minutes) |
 | `spring.jamjet.approval.default-decision` | `rejected` | Decision applied on timeout |
 | `spring.jamjet.approval.controller.allow-unauthenticated` | `false` | Register the approval endpoints without Spring Security (local development only) |
 | `spring.jamjet.connect-timeout-seconds` | `10` | Connection timeout |

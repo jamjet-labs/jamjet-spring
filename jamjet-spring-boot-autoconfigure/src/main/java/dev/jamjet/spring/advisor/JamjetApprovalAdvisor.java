@@ -15,6 +15,8 @@ import org.springframework.ai.chat.client.ChatClientRequest;
 import org.springframework.ai.chat.client.ChatClientResponse;
 import org.springframework.core.Ordered;
 
+import org.springframework.boot.convert.DurationStyle;
+
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.concurrent.TimeoutException;
@@ -58,6 +60,8 @@ public class JamjetApprovalAdvisor implements BaseAdvisor {
         this.client = client;
         this.properties = properties;
         this.waitRegistry = waitRegistry;
+        // Fail at startup on a bad timeout, not on the first call that needs approval.
+        parseTimeout(properties.getApproval().getTimeout());
     }
 
     @Override
@@ -148,20 +152,24 @@ public class JamjetApprovalAdvisor implements BaseAdvisor {
         return Boolean.TRUE.equals(required) || (required instanceof String s && s.equalsIgnoreCase("true"));
     }
 
+    /**
+     * Parses {@code spring.jamjet.approval.timeout}. A bare number is minutes (the
+     * 0.1.0 meaning); anything else is a Spring Boot duration: {@code 500ms},
+     * {@code 30s}, {@code 30m}, {@code 2h}, {@code 1d}, or ISO-8601 ({@code PT30M}).
+     */
     static Duration parseTimeout(String timeout) {
         if (timeout == null || timeout.isBlank()) {
             return Duration.ofMinutes(30);
         }
-        timeout = timeout.trim().toLowerCase();
-        if (timeout.endsWith("m")) {
-            return Duration.ofMinutes(Long.parseLong(timeout.substring(0, timeout.length() - 1)));
+        String t = timeout.trim();
+        if (t.chars().allMatch(Character::isDigit)) {
+            return Duration.ofMinutes(Long.parseLong(t));
         }
-        if (timeout.endsWith("s")) {
-            return Duration.ofSeconds(Long.parseLong(timeout.substring(0, timeout.length() - 1)));
+        try {
+            return DurationStyle.detectAndParse(t);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("spring.jamjet.approval.timeout '" + timeout + "' is not a duration "
+                    + "(use for example 500ms, 30s, 30m, 2h or PT30M)", e);
         }
-        if (timeout.endsWith("h")) {
-            return Duration.ofHours(Long.parseLong(timeout.substring(0, timeout.length() - 1)));
-        }
-        return Duration.ofMinutes(Long.parseLong(timeout));
     }
 }

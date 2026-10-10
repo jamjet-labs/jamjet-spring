@@ -113,4 +113,22 @@ class ReviewerPrincipalTest {
         assertThat(decide(new JamjetApprovalController(client, registry), approver("bob"))).isEqualTo(200);
         assertThat(call.get(2, TimeUnit.SECONDS).isApproved()).isTrue();
     }
+
+    @Test
+    void underAllowUnauthenticatedAnAnonymousPrincipalIsRecordedAsUnauthenticated() throws Exception {
+        var call = parked();
+        var open = new JamjetApprovalController(client, registry,
+                ReviewPolicy.defaults().withAllowUnauthenticated(true).withAllowUnknownInitiator(true));
+        var anonymous = new AnonymousAuthenticationToken("k", "anonymousUser",
+                AuthorityUtils.createAuthorityList("ROLE_ANONYMOUS"));
+
+        assertThat(decide(open, anonymous)).isEqualTo(200);
+
+        var body = runtime.requests().stream().filter(r -> r.path().equals(EVENTS)).reduce((a, b) -> b)
+                .orElseThrow().body();
+        var payload = new com.fasterxml.jackson.databind.ObjectMapper().readTree(body).get("payload");
+        assertThat(payload.get("authenticated").asBoolean()).isFalse();
+        assertThat(payload.get("approver").asText()).isEqualTo("unauthenticated");
+        call.get(2, TimeUnit.SECONDS);
+    }
 }

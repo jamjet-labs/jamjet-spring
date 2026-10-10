@@ -92,7 +92,7 @@ public class JamjetApprovalController {
         if (!reviewer.accepted()) {
             return error(HttpStatus.valueOf(reviewer.status()), executionId, reviewer.reason(), null);
         }
-        boolean authenticated = !policy.allowUnauthenticated() || principal != null;
+        boolean authenticated = reviewer.authenticated();
         String approver = reviewer.name();
         if (decision == null || !("approved".equals(decision.decision())
                 || "rejected".equals(decision.decision()))) {

@@ -10,17 +10,21 @@ import java.security.Principal;
 final class Reviewers {
 
     /** {@code name} when accepted; otherwise {@code status} and {@code reason}. */
-    record Verdict(String name, int status, String reason) {
+    record Verdict(String name, boolean authenticated, int status, String reason) {
         boolean accepted() {
             return name != null;
         }
 
         static Verdict accept(String name) {
-            return new Verdict(name, 200, null);
+            return new Verdict(name, true, 200, null);
+        }
+
+        static Verdict acceptUnauthenticated() {
+            return new Verdict(JamjetApprovalController.UNAUTHENTICATED, false, 200, null);
         }
 
         static Verdict refuse(int status, String reason) {
-            return new Verdict(null, status, reason);
+            return new Verdict(null, false, status, reason);
         }
     }
 
@@ -28,9 +32,12 @@ final class Reviewers {
 
     static Verdict check(Principal principal, ReviewPolicy policy) {
         if (policy.allowUnauthenticated()) {
-            String name = principal == null || principal.getName() == null || principal.getName().isBlank()
-                    ? JamjetApprovalController.UNAUTHENTICATED : principal.getName();
-            return Verdict.accept(name);
+            // Everyone may decide; record a name only for a principal that really
+            // authenticated (not anonymous, not an unauthenticated token).
+            boolean real = principal != null && principal.getName() != null && !principal.getName().isBlank()
+                    && !(CurrentPrincipal.securityPresent() && Security.check(principal,
+                            policy.withAllowRememberMe(true)) != null);
+            return real ? Verdict.accept(principal.getName()) : Verdict.acceptUnauthenticated();
         }
         if (principal == null || principal.getName() == null || principal.getName().isBlank()) {
             return Verdict.refuse(401, "an authenticated reviewer is required to decide an approval");

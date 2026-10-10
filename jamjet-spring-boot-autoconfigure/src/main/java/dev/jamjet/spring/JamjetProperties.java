@@ -10,6 +10,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * spring.jamjet.api-token=${JAMJET_API_TOKEN}
  * spring.jamjet.tenant-id=default
  * spring.jamjet.durability-enabled=true
+ * spring.jamjet.on-runtime-error=fail-closed
  * }</pre>
  */
 @ConfigurationProperties(prefix = "spring.jamjet")
@@ -26,6 +27,19 @@ public class JamjetProperties {
 
     /** Enable/disable durable execution. */
     private boolean durabilityEnabled = true;
+
+    /**
+     * What the advisors do when the runtime cannot record a call:
+     * {@code fail-closed} (default) refuses the call, {@code fail-open} logs a
+     * warning and lets it run unrecorded.
+     */
+    private RuntimeErrorMode onRuntimeError = RuntimeErrorMode.FAIL_CLOSED;
+
+    /**
+     * Workflow id the durability advisor registers on the runtime. Every
+     * advised call starts one execution of this workflow.
+     */
+    private String workflowId = "spring-ai-chat";
 
     /** Connection timeout in seconds. */
     private int connectTimeoutSeconds = 10;
@@ -72,6 +86,26 @@ public class JamjetProperties {
 
     public void setDurabilityEnabled(boolean durabilityEnabled) {
         this.durabilityEnabled = durabilityEnabled;
+    }
+
+    public RuntimeErrorMode getOnRuntimeError() {
+        return onRuntimeError;
+    }
+
+    public void setOnRuntimeError(RuntimeErrorMode onRuntimeError) {
+        this.onRuntimeError = onRuntimeError == null ? RuntimeErrorMode.FAIL_CLOSED : onRuntimeError;
+    }
+
+    public boolean isFailOpen() {
+        return onRuntimeError == RuntimeErrorMode.FAIL_OPEN;
+    }
+
+    public String getWorkflowId() {
+        return workflowId;
+    }
+
+    public void setWorkflowId(String workflowId) {
+        this.workflowId = workflowId;
     }
 
     public int getConnectTimeoutSeconds() {

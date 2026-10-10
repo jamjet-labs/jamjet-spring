@@ -118,17 +118,33 @@ public final class ApprovalContent {
         return out;
     }
 
+    /** Names handled explicitly below, or that cannot be serialized (tool callbacks hold code). */
+    private static final java.util.Set<String> SPECIAL_PROPERTIES = java.util.Set.of(
+            "class", "toolCallbacks", "toolNames", "toolContext", "internalToolExecutionEnabled");
+
+    /**
+     * Every readable property of the concrete options object (so provider-specific
+     * options such as a tool choice or a seed are covered without knowing the
+     * provider), plus its type, the tool names and definitions, and the tool context.
+     */
     private static Map<String, Object> options(ChatOptions options) {
         var out = new LinkedHashMap<String, Object>();
         if (options == null) {
             return out;
         }
-        out.put("model", options.getModel());
-        out.put("temperature", options.getTemperature());
-        out.put("top_p", options.getTopP());
-        out.put("top_k", options.getTopK());
-        out.put("max_tokens", options.getMaxTokens());
-        out.put("stop_sequences", options.getStopSequences());
+        out.put("type", options.getClass().getName());
+        var properties = new java.util.TreeMap<String, Object>();
+        for (var pd : org.springframework.beans.BeanUtils.getPropertyDescriptors(options.getClass())) {
+            if (pd.getReadMethod() == null || SPECIAL_PROPERTIES.contains(pd.getName())) {
+                continue;
+            }
+            try {
+                properties.put(pd.getName(), plain(pd.getReadMethod().invoke(options)));
+            } catch (ReflectiveOperationException | RuntimeException e) {
+                properties.put(pd.getName(), "<unreadable: " + e.getClass().getSimpleName() + ">");
+            }
+        }
+        out.put("properties", properties);
         if (options instanceof ToolCallingChatOptions tools) {
             out.put("tool_names", tools.getToolNames() == null ? List.of() : new TreeSet<>(tools.getToolNames()));
             var definitions = new ArrayList<Map<String, Object>>();
@@ -144,8 +160,25 @@ public final class ApprovalContent {
             definitions.sort(Comparator.comparing(d -> String.valueOf(d.get("name"))));
             out.put("tool_definitions", definitions);
             out.put("internal_tool_execution", tools.getInternalToolExecutionEnabled());
+            var context = new java.util.TreeMap<String, Object>();
+            if (tools.getToolContext() != null) {
+                tools.getToolContext().forEach((k, v) -> context.put(k, plain(v)));
+            }
+            out.put("tool_context", context);
         }
         return out;
+    }
+
+    /** A value as JSON-like data, or its string form when Jackson cannot represent it. */
+    private static Object plain(Object value) {
+        if (value == null) {
+            return null;
+        }
+        try {
+            return CANONICAL.valueToTree(value);
+        } catch (IllegalArgumentException e) {
+            return value.getClass().getName() + ":" + value;
+        }
     }
 
     /**

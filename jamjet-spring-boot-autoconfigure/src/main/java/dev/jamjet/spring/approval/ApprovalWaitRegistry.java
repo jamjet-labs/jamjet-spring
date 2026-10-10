@@ -38,10 +38,11 @@ public class ApprovalWaitRegistry {
                           AtomicReference<State> state) {}
 
     /**
-     * How long a call whose timeout fired keeps waiting for a decision that was
-     * already being recorded when it fired, so the record and the call agree.
+     * Default for how long a call whose timeout fired keeps waiting for a
+     * decision that was already being recorded when it fired. The advisor passes
+     * one derived from the client's own timeouts.
      */
-    static final Duration DECIDING_GRACE = Duration.ofMinutes(2);
+    static final Duration DEFAULT_DECIDING_GRACE = Duration.ofSeconds(140);
 
     private final ConcurrentHashMap<String, Waiter> pending = new ConcurrentHashMap<>();
 
@@ -57,6 +58,18 @@ public class ApprovalWaitRegistry {
     /** As {@link #waitForApproval(String, Duration)}, recording what the reviewer is shown. */
     public ApprovalDecision waitForApproval(String executionId, Duration timeout, WaitContext context)
             throws TimeoutException, InterruptedException {
+        return waitForApproval(executionId, timeout, context, DEFAULT_DECIDING_GRACE);
+    }
+
+    /**
+     * As {@link #waitForApproval(String, Duration, WaitContext)}, waiting up to
+     * {@code decidingGrace} more for a decision that claimed the call before the
+     * timeout fired. Every exit other than a delivered decision is a rejection by
+     * the caller.
+     */
+    public ApprovalDecision waitForApproval(String executionId, Duration timeout, WaitContext context,
+                                            Duration decidingGrace)
+            throws TimeoutException, InterruptedException {
         var waiter = pending.computeIfAbsent(executionId,
                 k -> new Waiter(new CompletableFuture<>(), Instant.now(),
                         context == null ? WaitContext.NONE : context, new AtomicReference<>(State.WAITING)));
@@ -69,7 +82,7 @@ public class ApprovalWaitRegistry {
             // A decision claimed the call before the timeout fired and is being
             // recorded: apply it rather than contradict what the runtime records.
             try {
-                return waiter.decision().get(DECIDING_GRACE.toMillis(), TimeUnit.MILLISECONDS);
+                return waiter.decision().get(decidingGrace.toMillis(), TimeUnit.MILLISECONDS);
             } catch (TimeoutException late) {
                 throw new TimeoutException("Approval timed out for execution " + executionId
                         + " while a decision was being recorded");

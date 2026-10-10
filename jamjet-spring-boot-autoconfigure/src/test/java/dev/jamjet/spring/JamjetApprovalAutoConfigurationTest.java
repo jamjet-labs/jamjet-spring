@@ -35,13 +35,21 @@ class JamjetApprovalAutoConfigurationTest {
         runner.withPropertyValues(
                 "spring.jamjet.approval.enabled=true",
                 "spring.jamjet.approval.timeout=1h",
-                "spring.jamjet.approval.default-decision=approved",
+                "spring.jamjet.approval.default-decision=rejected",
                 "spring.jamjet.approval.webhook-url=https://hooks.slack.com/test"
         ).run(context -> {
             var props = context.getBean(JamjetProperties.class);
             assertThat(props.getApproval().getTimeout()).isEqualTo("1h");
-            assertThat(props.getApproval().getDefaultDecision()).isEqualTo("approved");
+            assertThat(props.getApproval().getDefaultDecision()).isEqualTo("rejected");
             assertThat(props.getApproval().getWebhookUrl()).isEqualTo("https://hooks.slack.com/test");
         });
+    }
+
+    @Test
+    void anApprovedTimeoutDefaultStopsTheApplication() {
+        runner.withPropertyValues("spring.jamjet.approval.enabled=true",
+                "spring.jamjet.approval.default-decision=approved")
+                .run(context -> assertThat(context).hasFailed()
+                        .getFailure().hasStackTraceContaining("never approves"));
     }
 }

@@ -225,7 +225,11 @@ public class JamjetProperties {
         /** Max time to wait for an approval before timing out. */
         private String timeout = "30m";
 
-        /** What happens on timeout: "approved" or "rejected". */
+        /**
+         * Deprecated: a call that times out is always rejected. Only "rejected" is
+         * accepted; any other value fails at startup.
+         */
+        @Deprecated
         private String defaultDecision = "rejected";
 
         /** The approval REST endpoints ({@code spring.jamjet.approval.controller.*}). */
@@ -263,10 +267,14 @@ public class JamjetProperties {
             this.timeout = timeout;
         }
 
+        /** @deprecated a timed-out call is always rejected. */
+        @Deprecated
         public String getDefaultDecision() {
             return defaultDecision;
         }
 
+        /** @deprecated a timed-out call is always rejected; only "rejected" is accepted. */
+        @Deprecated
         public void setDefaultDecision(String defaultDecision) {
             this.defaultDecision = defaultDecision;
         }

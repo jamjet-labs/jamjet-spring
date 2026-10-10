@@ -107,7 +107,6 @@ An allowed stream records the whole streamed text as `spring_ai.response` and an
 ```properties
 spring.jamjet.approval.enabled=true
 spring.jamjet.approval.timeout=30m
-spring.jamjet.approval.default-decision=rejected
 ```
 
 Mark a call as needing approval:
@@ -151,7 +150,7 @@ For local development without Spring Security, `spring.jamjet.approval.controlle
 
 **Approvals the runtime holds are not decided here.** The runtime records the identity of the token that sends a decision and enforces separation of duties on it, so the application never forwards decisions with its own token. `/pending` lists any requests the runtime holds for a waiting call's execution, read-only, with their `action_digest` and the command to run with your own runtime token, for example `jamjet approve exec_... --decision approved --node-id pay --action-digest <digest>`.
 
-A decision is appended to the call's execution as a `spring_ai.approval_decision` event (approver, whether authenticated, the initiator when known, comment) before the call is released. If it cannot be recorded, the endpoint answers with the runtime's status (or 502) and message, and the waiting call is released as rejected. Only `"approved"` lets a call through; a timeout applies `default-decision`, and anything other than `approved` rejects.
+A decision is appended to the call's execution as a `spring_ai.approval_decision` event (approver, whether authenticated, the initiator when known, comment) before the call is released. If it cannot be recorded, the endpoint answers with the runtime's status (or 502) and message, and the waiting call is released as rejected. Only `"approved"` lets a call through. A call that times out is always rejected (`default-decision` is deprecated; any value other than `rejected` fails at startup). If a decision is recorded but the call stopped waiting before it could be delivered, the endpoint answers 409 and appends a `spring_ai.approval_decision_void` event, so the record never claims a decision that did not apply.
 
 A call marked as requiring approval never runs ungated: `JamjetApprovalGuard` is auto-configured on its own, independently of `durability-enabled` and `approval.enabled`, and refuses the call before the model runs when no approval advisor is on the ChatClient. A call whose execution could not be started (the runtime failed open) is rejected by the approval advisor.
 
@@ -169,7 +168,7 @@ A call marked as requiring approval never runs ungated: `JamjetApprovalGuard` is
 | `spring.jamjet.audit.include-responses` | `true` | Record response text and token usage |
 | `spring.jamjet.approval.enabled` | `false` | Add the approval advisor and endpoints |
 | `spring.jamjet.approval.timeout` | `30m` | How long a call waits for a decision (`500ms`, `30s`, `30m`, `2h`, ISO-8601; a bare number is minutes) |
-| `spring.jamjet.approval.default-decision` | `rejected` | Decision applied on timeout |
+| `spring.jamjet.approval.default-decision` | `rejected` | Deprecated. A timed-out call is always rejected; any other value fails at startup |
 | `spring.jamjet.approval.controller.allow-unauthenticated` | `false` | Register the approval endpoints without Spring Security (local development only) |
 | `spring.jamjet.connect-timeout-seconds` | `10` | Connection timeout |
 | `spring.jamjet.read-timeout-seconds` | `120` | Read timeout |

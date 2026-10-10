@@ -145,20 +145,31 @@ class JamjetApprovalAdvisorFlowTest {
     }
 
     @Test
-    void aTimeoutAppliesAnExplicitApprovedDefault() {
-        runtime.on("POST", EVENTS, 200, "{\"execution_id\":\"exec_1\",\"accepted\":true}");
+    void aTimeoutNeverApprovesSoAnApprovedDefaultFailsAtStartup() {
+        props.getApproval().setDefaultDecision("approved");
 
-        assertThat(unattended(withTimeout("1s", "approved"))).isEqualTo("hello");
-        assertThat(model.calls).hasValue(1);
+        assertThatThrownBy(() -> new JamjetApprovalAdvisor(new JamjetRuntimeClient(props), props, registry))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("spring.jamjet.approval.default-decision")
+                .hasMessageContaining("never approves");
     }
 
     @Test
-    void anUnrecognisedDefaultDecisionRejectsOnTimeout() {
-        runtime.on("POST", EVENTS, 200, "{\"execution_id\":\"exec_1\",\"accepted\":true}");
+    void anUnrecognisedDefaultDecisionFailsAtStartup() {
+        props.getApproval().setDefaultDecision("maybe");
 
-        assertThatThrownBy(() -> unattended(withTimeout("1s", "maybe")))
-                .isInstanceOf(ApprovalRejectedException.class);
-        assertThat(model.calls).hasValue(0);
+        assertThatThrownBy(() -> new JamjetApprovalAdvisor(new JamjetRuntimeClient(props), props, registry))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void theWaitForAnInFlightDecisionCoversTheClientsOwnTimeouts() {
+        props.setConnectTimeoutSeconds(3);
+        props.setReadTimeoutSeconds(40);
+
+        assertThat(JamjetApprovalAdvisor.decidingGrace(props))
+                .as("a decision being recorded cannot outlive the wait for it")
+                .isGreaterThan(java.time.Duration.ofSeconds(43));
     }
 
     @Test

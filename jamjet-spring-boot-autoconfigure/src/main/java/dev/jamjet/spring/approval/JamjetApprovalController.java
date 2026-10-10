@@ -61,6 +61,9 @@ public class JamjetApprovalController {
     /** Correlation key of the event recording a decision. */
     public static final String DECISION_EVENT = "spring_ai.approval_decision";
 
+    /** Correlation key of the event recording that a recorded decision did not take effect. */
+    public static final String VOID_EVENT = "spring_ai.approval_decision_void";
+
     /** Approver recorded for a decision made without authentication (local development only). */
     public static final String UNAUTHENTICATED = "unauthenticated";
 
@@ -144,6 +147,16 @@ public class JamjetApprovalController {
 
         var forCall = new ApprovalDecision(decision.decision(), null, recordedApprover, decision.comment(), null);
         boolean released = waitRegistry.complete(executionId, forCall);
+        if (!released) {
+            // The call stopped waiting (timed out past the grace, or was interrupted)
+            // while the decision was being recorded. The record must not stand as if
+            // it applied: append a correcting event and tell the reviewer.
+            voidDecision(executionId, recordedApprover, decision.decision(),
+                    "the call stopped waiting before the decision could be delivered; it was rejected");
+            return error(HttpStatus.CONFLICT, executionId, "the decision was recorded but did not take effect: "
+                    + "the call stopped waiting before it could be delivered and was rejected. A "
+                    + VOID_EVENT + " event records that.", null);
+        }
         var body = new LinkedHashMap<String, Object>();
         body.put("execution_id", executionId);
         body.put("decision", decision.decision());
@@ -197,6 +210,20 @@ public class JamjetApprovalController {
             out.add(item);
         }
         return ResponseEntity.ok(out);
+    }
+
+    private void voidDecision(String executionId, String approver, String decision, String reason) {
+        try {
+            var payload = new LinkedHashMap<String, Object>();
+            payload.put("voids", DECISION_EVENT);
+            payload.put("decision", decision);
+            payload.put("approver", approver);
+            payload.put("reason", reason);
+            client.sendExternalEvent(executionId, VOID_EVENT, payload);
+        } catch (JamjetClientException e) {
+            log.error("Execution {}: a recorded {} decision did not take effect and the correcting {} event "
+                    + "could not be written: {}", executionId, decision, VOID_EVENT, e.getMessage());
+        }
     }
 
     /** Release the waiting call as rejected and answer with the runtime's error. */

@@ -62,6 +62,32 @@ public class JamjetApprovalAdvisor implements BaseAdvisor {
         this.waitRegistry = waitRegistry;
         // Fail at startup on a bad timeout, not on the first call that needs approval.
         parseTimeout(properties.getApproval().getTimeout());
+        checkDefaultDecision(properties.getApproval().getDefaultDecision());
+    }
+
+    /**
+     * A timeout never approves. {@code default-decision} is deprecated and only
+     * {@code rejected} is accepted, so a misconfiguration fails at startup instead
+     * of letting unattended calls through.
+     */
+    @SuppressWarnings("deprecation")
+    static void checkDefaultDecision(String defaultDecision) {
+        if (defaultDecision != null && !defaultDecision.isBlank() && !"rejected".equalsIgnoreCase(defaultDecision)) {
+            throw new IllegalArgumentException("spring.jamjet.approval.default-decision='" + defaultDecision
+                    + "' is not supported: a call that times out never approves, so it is always rejected. "
+                    + "Remove the property (it is deprecated) or set it to rejected.");
+        }
+    }
+
+    /**
+     * How long a call whose timeout fired keeps waiting for a decision that was
+     * already being recorded: longer than the client can take to record it
+     * (connect plus read timeout), plus a margin.
+     */
+    public static Duration decidingGrace(JamjetProperties properties) {
+        return Duration.ofSeconds(properties.getConnectTimeoutSeconds())
+                .plusSeconds(properties.getReadTimeoutSeconds())
+                .plusSeconds(10);
     }
 
     @Override
@@ -108,7 +134,8 @@ public class JamjetApprovalAdvisor implements BaseAdvisor {
             // cannot approve it (separation of duties, enforced by the controller).
             var context = new ApprovalWaitRegistry.WaitContext(CurrentPrincipal.name(),
                     ApprovalContent.preview(request.prompt()), ApprovalContent.digest(request.prompt()));
-            ApprovalDecision decision = waitRegistry.waitForApproval(executionId, timeout, context);
+            ApprovalDecision decision = waitRegistry.waitForApproval(executionId, timeout, context,
+                    decidingGrace(properties));
 
             // Only an explicit "approved" lets the call through.
             if (decision == null || !decision.isApproved()) {
@@ -121,15 +148,8 @@ public class JamjetApprovalAdvisor implements BaseAdvisor {
             return request;
 
         } catch (TimeoutException e) {
-            String defaultDecision = properties.getApproval().getDefaultDecision();
-            log.warn("Approval timed out for execution {}, applying default: {}",
-                    executionId, defaultDecision);
-
-            if (!"approved".equalsIgnoreCase(defaultDecision)) {
-                throw new ApprovalRejectedException(executionId,
-                        "Approval timed out, default decision: " + defaultDecision);
-            }
-            return request;
+            log.warn("Approval timed out for execution {}; rejecting the call", executionId);
+            throw new ApprovalRejectedException(executionId, "Approval timed out; a timed-out call is rejected");
 
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();

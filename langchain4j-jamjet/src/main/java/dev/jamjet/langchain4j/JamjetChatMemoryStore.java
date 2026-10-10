@@ -38,8 +38,10 @@ import java.util.Collections;
  * process scans {@code GET /executions} for its execution and caches the result.
  * The scan is linear in the tenant's execution count. A miss is cached too (for
  * {@link #DEFAULT_MISS_TTL}), so a new conversation scans once. Locks are striped
- * by id (64 stripes), so conversations rarely wait for each other's scan, and
- * both caches are bounded ({@link #DEFAULT_MAX_CACHED_IDS} each, least recently
+ * by id (64 stripes). Two ids that share a stripe serialize: a new conversation can
+ * wait behind an unrelated one's network-bound scan of {@code GET /executions} or
+ * its {@code POST /executions}. That bounds memory use at the cost of occasional
+ * waiting. Both caches are bounded ({@link #DEFAULT_MAX_CACHED_IDS} each, least recently
  * used evicted; an evicted id is simply scanned for again).
  *
  * <p><b>One writer per memory id.</b> Two processes (replicas) that both write a

@@ -6,6 +6,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
@@ -74,27 +75,61 @@ public class ApprovalWaitRegistry {
                 k -> new Waiter(new CompletableFuture<>(), Instant.now(),
                         context == null ? WaitContext.NONE : context, new AtomicReference<>(State.WAITING)));
         try {
-            return waiter.decision().get(timeout.toMillis(), TimeUnit.MILLISECONDS);
-        } catch (TimeoutException e) {
-            if (waiter.state().compareAndSet(State.WAITING, State.TIMED_OUT)) {
-                throw new TimeoutException("Approval timed out for execution " + executionId);
-            }
-            // A decision claimed the call before the timeout fired and is being
-            // recorded: apply it rather than contradict what the runtime records.
             try {
-                return waiter.decision().get(decidingGrace.toMillis(), TimeUnit.MILLISECONDS);
-            } catch (TimeoutException late) {
-                throw new TimeoutException("Approval timed out for execution " + executionId
-                        + " while a decision was being recorded");
-            } catch (ExecutionException ex) {
-                throw new IllegalStateException("Approval wait failed for execution " + executionId, ex.getCause());
+                return waiter.decision().get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+            } catch (TimeoutException e) {
+                if (waiter.state().compareAndSet(State.WAITING, State.TIMED_OUT)) {
+                    return giveUp(waiter, new TimeoutException("Approval timed out for execution " + executionId));
+                }
+                // A decision claimed the call before the timeout fired and is being
+                // recorded: apply it rather than contradict what the runtime records.
+                try {
+                    return waiter.decision().get(decidingGrace.toMillis(), TimeUnit.MILLISECONDS);
+                } catch (TimeoutException late) {
+                    return giveUp(waiter, new TimeoutException("Approval timed out for execution " + executionId
+                            + " while a decision was being recorded"));
+                }
             }
+        } catch (InterruptedException e) {
+            ApprovalDecision won = settle(waiter);
+            if (won != null) {
+                Thread.currentThread().interrupt();
+                return won;
+            }
+            beforeGivingUp.accept(executionId);
+            throw e;
         } catch (ExecutionException e) {
             throw new IllegalStateException("Approval wait failed for execution " + executionId, e.getCause());
         } finally {
             pending.remove(executionId, waiter);
         }
     }
+
+    /**
+     * Settle the wait before giving up, so no decision can be delivered to a call
+     * that is already being rejected: a later {@link #complete} returns false and
+     * the controller voids the recorded decision. If a decision won the race, it
+     * is returned instead and applies.
+     */
+    private ApprovalDecision giveUp(Waiter waiter, TimeoutException timeout) throws TimeoutException {
+        ApprovalDecision won = settle(waiter);
+        if (won != null) {
+            return won;
+        }
+        beforeGivingUp.accept(timeout.getMessage());
+        throw timeout;
+    }
+
+    private static ApprovalDecision settle(Waiter waiter) {
+        waiter.state().compareAndSet(State.WAITING, State.TIMED_OUT);
+        if (waiter.decision().completeExceptionally(new CancellationException("the call stopped waiting"))) {
+            return null;
+        }
+        return waiter.decision().isCompletedExceptionally() ? null : waiter.decision().getNow(null);
+    }
+
+    /** Test hook: runs after a wait was settled as not delivered, before it is removed. */
+    volatile java.util.function.Consumer<String> beforeGivingUp = id -> { };
 
     /**
      * Claim the waiting call for one decision. Exactly one caller wins; a second

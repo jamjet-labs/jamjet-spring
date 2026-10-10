@@ -2,12 +2,12 @@
 
 > **Heads up:** active development of this Spring Boot starter is moving
 > under [`jamjet-runtime-java/modules/spring-boot-starter`](https://github.com/jamjet-labs/jamjet-runtime-java) in the next JVM runtime release.
-> **Maven coordinates remain unchanged** — `dev.jamjet:jamjet-spring-boot-starter`.
+> **Maven coordinates remain unchanged**: `dev.jamjet:jamjet-spring-boot-starter`.
 > This repo will receive a redirect README and be archived after the next JVM release confirms a clean Maven publish from the new path.
 
-Spring Boot starter for [JamJet](https://jamjet.dev) — add one dependency, your Spring AI agents become durable.
+Spring Boot starter for [JamJet](https://jamjet.dev). Add one dependency and every Spring AI `ChatClient` call is recorded on the JamJet runtime as an execution with an event log, with optional human approval before the model is called.
 
-**Crash recovery, event sourcing, and execution tracking for any Spring AI application.**
+> **Upgrading from 0.1.0:** 0.1.0 called `/api/v1/...` routes the runtime never served. The runtime answered them with its web UI (`200 text/html`), the advisors logged a warning and carried on, and nothing was recorded. 0.2.0 calls the runtime's real routes and refuses calls it cannot record (see [When the runtime is unavailable](#when-the-runtime-is-unavailable)).
 
 ## Quickstart
 
@@ -17,15 +17,17 @@ Spring Boot starter for [JamJet](https://jamjet.dev) — add one dependency, you
 <dependency>
     <groupId>dev.jamjet</groupId>
     <artifactId>jamjet-spring-boot-starter</artifactId>
-    <version>0.1.0-SNAPSHOT</version>
+    <version>0.2.0</version>
 </dependency>
 ```
 
 ### 2. Start the JamJet runtime
 
 ```bash
-docker run -p 7700:7700 ghcr.io/jamjet-labs/jamjet:latest
+docker run -p 7700:8080 -e JAMJET_DEV_MODE=1 jamjetdev/jamjet:0.5.0
 ```
+
+Dev mode turns off authentication and keeps state in memory. Outside dev mode, set `spring.jamjet.api-token`.
 
 ### 3. Configure
 
@@ -33,9 +35,7 @@ docker run -p 7700:7700 ghcr.io/jamjet-labs/jamjet:latest
 spring.jamjet.runtime-url=http://localhost:7700
 ```
 
-That's it. Every `ChatClient` call is now backed by durable execution.
-
-### 4. Use as normal
+### 4. Use the ChatClient as normal
 
 ```java
 @SpringBootApplication
@@ -43,40 +43,99 @@ public class MyApp {
 
     @Bean
     ChatClient chatClient(ChatClient.Builder builder) {
-        return builder.build(); // JamJet advisor auto-injected
+        return builder.build(); // JamJet advisors are added by auto-configuration
     }
 
     @Bean
     CommandLineRunner demo(ChatClient chatClient) {
-        return args -> {
-            String result = chatClient.prompt("Summarize AI trends")
-                    .call()
-                    .content();
-            System.out.println(result);
-            // This call is durable — crash recovery enabled
-        };
+        return args -> System.out.println(
+                chatClient.prompt("Summarize AI trends").call().content());
     }
 }
 ```
 
-## What you get
+## What gets recorded
 
-| Feature | How |
-|---------|-----|
-| **Crash recovery** | Executions resume from last checkpoint after restarts |
-| **Event sourcing** | Every LLM call, tool invocation, and state change recorded |
-| **Execution tracking** | Query execution status, events, and history via API |
-| **Zero code changes** | Auto-configured as a Spring AI `BaseAdvisor` |
-| **Graceful degradation** | Falls back to normal operation if runtime is unavailable |
+The auto-configured `ChatClientCustomizer` adds these advisors to every auto-configured `ChatClient`:
+
+| Advisor | What it does on the runtime |
+|---------|-----------------------------|
+| `JamjetDurabilityAdvisor` | Registers the `spring-ai-chat` workflow once (`POST /workflows`), starts one execution per call (`POST /executions`) before the model is called, and appends a `spring_ai.completed` event with the outcome (`completed` or `failed`). |
+| `JamjetAuditAdvisor` | Appends the prompt and the response as `spring_ai.prompt` and `spring_ai.response` events. Turn the text off with `spring.jamjet.audit.include-prompts=false` / `include-responses=false`. |
+| `JamjetApprovalAdvisor` | Opt in with `spring.jamjet.approval.enabled=true`. Pauses calls that ask for approval until a reviewer decides (see below). |
+
+Read a call's record back with `GET /executions/{id}/events`, or from Java:
+
+```java
+List<ExecutionEvent> events = runtimeClient.listEvents(executionId);
+```
+
+The model call runs in your JVM. The runtime holds the record: the workflow's single node is a `wait` on the `spring_ai.completed` event, which the advisor sends when the call ends. The runtime does not re-run or replay Spring AI calls.
+
+## When the runtime is unavailable
+
+By default a call the runtime cannot record is refused: the advisor throws `JamjetGovernanceException` with the runtime's error, and the model is not called. That covers a runtime that is down, a refusal (4xx/5xx), and a `runtime-url` that does not point at the runtime API (any non-JSON answer is an error, never data).
+
+To let calls run unrecorded instead, opt in:
+
+```properties
+spring.jamjet.on-runtime-error=fail-open
+```
+
+Fail-open logs a warning for every call it lets through.
+
+## Human approval
+
+```properties
+spring.jamjet.approval.enabled=true
+spring.jamjet.approval.timeout=30m
+spring.jamjet.approval.default-decision=rejected
+```
+
+Mark a call as needing approval:
+
+```java
+chatClient.prompt("Send the wire")
+        .advisors(a -> a.param(JamjetApprovalAdvisor.REQUIRES_APPROVAL_KEY, true))
+        .call()
+        .content();
+```
+
+The call records `spring_ai.approval_requested` on its execution and blocks. A reviewer then uses the approval endpoints (registered in web applications):
+
+```bash
+# Calls waiting for a decision, with any approval requests the runtime holds for them
+curl http://localhost:8080/jamjet/approvals/pending
+
+# Decide
+curl -X POST http://localhost:8080/jamjet/approvals/{executionId} \
+  -H 'Content-Type: application/json' \
+  -d '{"decision":"approved","user_id":"alice","comment":"checked"}'
+```
+
+The decision is recorded on the runtime before the call is released:
+
+- If the runtime holds a pending approval for the execution, the decision goes to `POST /executions/{id}/approve`. Send the `node_id` and the `action_digest` shown in `/pending` for the request you reviewed. Outside dev mode the runtime requires the digest to approve and refuses a decision made against a request that has since changed.
+- Otherwise it is appended as a `spring_ai.approval_decision` event.
+
+If the runtime refuses the decision or cannot be reached, the endpoint answers with the runtime's status (or 502) and message, and the waiting call is released at once as rejected. Only `"approved"` lets a call through; a timeout applies `default-decision`, and anything other than `approved` rejects. A call that requires approval but has no execution (durability off, or the runtime failed open) is rejected.
 
 ## Configuration
 
 | Property | Default | Description |
 |----------|---------|-------------|
 | `spring.jamjet.runtime-url` | `http://localhost:7700` | JamJet runtime URL |
-| `spring.jamjet.api-token` | — | API token for authentication |
-| `spring.jamjet.tenant-id` | `default` | Tenant ID for multi-tenant isolation |
-| `spring.jamjet.durability-enabled` | `true` | Enable/disable durable execution |
+| `spring.jamjet.api-token` | none | Bearer token for the runtime |
+| `spring.jamjet.tenant-id` | `default` | Sent as `X-Tenant-Id` |
+| `spring.jamjet.durability-enabled` | `true` | Enable the starter |
+| `spring.jamjet.on-runtime-error` | `fail-closed` | `fail-closed` refuses calls the runtime cannot record; `fail-open` runs them unrecorded |
+| `spring.jamjet.workflow-id` | `spring-ai-chat` | Workflow the durability advisor registers |
+| `spring.jamjet.audit.enabled` | `true` | Add the audit advisor |
+| `spring.jamjet.audit.include-prompts` | `true` | Record prompt text |
+| `spring.jamjet.audit.include-responses` | `true` | Record response text and token usage |
+| `spring.jamjet.approval.enabled` | `false` | Add the approval advisor and endpoints |
+| `spring.jamjet.approval.timeout` | `30m` | How long a call waits for a decision |
+| `spring.jamjet.approval.default-decision` | `rejected` | Decision applied on timeout |
 | `spring.jamjet.connect-timeout-seconds` | `10` | Connection timeout |
 | `spring.jamjet.read-timeout-seconds` | `120` | Read timeout |
 
@@ -84,8 +143,10 @@ public class MyApp {
 
 | Module | Description |
 |--------|-------------|
-| `jamjet-spring-boot-autoconfigure` | Auto-configuration, advisor, and runtime client |
+| `jamjet-spring-boot-autoconfigure` | Auto-configuration, advisors, approval endpoints and the runtime client |
 | `jamjet-spring-boot-starter` | Starter POM (add this to your project) |
+| `jamjet-spring-boot-starter-test` | JUnit 5 replay testing and a runtime Testcontainer |
+| `langchain4j-jamjet` | LangChain4j durable agent and chat memory store |
 | `jamjet-spring-boot-starter-example` | Example application |
 
 ## Requirements
@@ -93,47 +154,41 @@ public class MyApp {
 - Java 21+
 - Spring Boot 3.4+
 - Spring AI 1.0+
-- JamJet runtime (Docker or binary)
-
-## Roadmap
-
-- **Phase 2**: Audit trails + human-in-the-loop approval
-- ✓ **Phase 3**: JUnit 5 replay testing + Micrometer/OpenTelemetry observability (COMPLETE)
-- ✓ **Phase 4a**: LangChain4j integration (COMPLETE)
-- **Phase 4b**: Quarkus and A2A bridge integrations
+- JamJet runtime 0.5.0+ (Docker image `jamjetdev/jamjet` or the `jamjet-server` binary)
 
 ## Testing (`jamjet-spring-boot-starter-test`)
-
-Add to your test dependencies:
 
 ```xml
 <dependency>
     <groupId>dev.jamjet</groupId>
     <artifactId>jamjet-spring-boot-starter-test</artifactId>
-    <version>0.1.0-SNAPSHOT</version>
+    <version>0.2.0</version>
     <scope>test</scope>
 </dependency>
 ```
 
-**Replay tests** — replay production executions in JUnit 5:
+**Replay tests**: load a recorded execution in JUnit 5:
 
 ```java
 @WithJamjetRuntime
 class MyAgentTest {
 
     @Test
-    @ReplayExecution("exec-abc123")
+    @ReplayExecution("exec_abc123")
     void agentProducesConsistentOutput(RecordedExecution execution) {
         AgentAssertions.assertThat(execution)
             .completedSuccessfully()
-            .usedTool("WebSearch")
-            .completedWithin(30, TimeUnit.SECONDS)
-            .costLessThan(0.50);
+            .hasEvent("node_completed")
+            .completedWithin(30, TimeUnit.SECONDS);
     }
 }
 ```
 
-**Deterministic stubs** — no LLM calls needed:
+Event names are the runtime's `kind.type` tags (`node_completed`, `node_failed`, `external_event_received`); `hasEvent` also accepts the PascalCase form.
+
+**Runtime container**: `JamjetTestContainer` runs `jamjetdev/jamjet:0.5.0` in dev mode.
+
+**Deterministic stubs**: no LLM calls needed:
 
 ```java
 var stub = DeterministicModelStub.builder()
@@ -144,7 +199,7 @@ var stub = DeterministicModelStub.builder()
 
 ## Observability
 
-**Micrometer** (on by default when actuator present):
+**Micrometer** (on by default when actuator is present):
 
 ```properties
 spring.jamjet.observability.micrometer=true
@@ -163,39 +218,46 @@ Span hierarchy: `jamjet.execution` → `jamjet.node.{id}` → `jamjet.tool.{name
 
 ## LangChain4j Integration (`langchain4j-jamjet`)
 
-Add to your dependencies:
-
 ```xml
 <dependency>
     <groupId>dev.jamjet</groupId>
     <artifactId>langchain4j-jamjet</artifactId>
-    <version>0.1.0-SNAPSHOT</version>
+    <version>0.2.0</version>
 </dependency>
 ```
 
-**Durable agents** — wrap any AiServices proxy:
+**Recorded AI services**: wrap any `AiServices` proxy. Each method call starts an execution of the `langchain4j-durable-agent` workflow and records a `langchain4j.completed` event with the result or the error:
 
 ```java
-var client = new JamjetConfig()
-    .runtimeUrl("http://localhost:7700")
-    .buildClient();
+var jamjet = new JamjetConfig().runtimeUrl("http://localhost:7700");
 
 MyAssistant raw = AiServices.builder(MyAssistant.class)
-    .chatLanguageModel(model).tools(tools).build();
+    .chatModel(model).tools(tools).build();
 
-MyAssistant durable = JamjetDurableAgent.wrap(raw, MyAssistant.class, client);
-// Every call is now tracked, audited, crash-recoverable
+MyAssistant recorded = jamjet.wrap(raw, MyAssistant.class);
 ```
 
-**Event-sourced chat memory:**
+**Chat memory on the runtime**: each memory id is one execution of the `langchain4j-chat-memory` workflow; every update appends the full message list as a `chat_memory` event and reads take the latest one.
 
 ```java
-var store = new JamjetChatMemoryStore(client);
+var store = jamjet.chatMemoryStore();
 var memory = MessageWindowChatMemory.builder()
     .chatMemoryStore(store)
     .id("session-1")
     .maxMessages(20)
     .build();
+```
+
+The runtime has no lookup by input, so the first access to a memory id in a process scans `GET /executions` for it and caches the result.
+
+Both refuse to run unrecorded by default (`JamjetGovernanceException`); `new JamjetConfig().onRuntimeError(RuntimeErrorMode.FAIL_OPEN)` lets calls run and reads fall back to an empty memory instead.
+
+## Building
+
+```bash
+mvn -Dgpg.skip verify            # unit tests
+mvn -Dgpg.skip -Pit verify       # plus RuntimeContractIT against a real runtime (Docker)
+JAMJET_IT_RUNTIME_URL=http://localhost:7700 mvn -Dgpg.skip -Pit verify   # use a runtime you started (dev mode)
 ```
 
 ## License

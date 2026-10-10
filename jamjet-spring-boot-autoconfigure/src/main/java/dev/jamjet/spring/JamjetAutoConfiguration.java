@@ -11,6 +11,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.ChatClientCustomizer;
+import org.springframework.ai.chat.client.advisor.api.Advisor;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
@@ -21,6 +23,9 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
+import java.util.ArrayList;
+import java.util.List;
+
 /**
  * Auto-configuration for JamJet durable execution with Spring AI.
  *
@@ -28,6 +33,7 @@ import org.springframework.context.annotation.Configuration;
  * <ul>
  *   <li>{@link JamjetRuntimeClient} — always (when durability enabled)</li>
  *   <li>{@link JamjetDurabilityAdvisor} — always (core durability)</li>
+ *   <li>a {@link ChatClientCustomizer} adding the enabled advisors to every auto-configured ChatClient</li>
  *   <li>{@link JamjetAuditAdvisor} + {@link JamjetAuditService} — when {@code spring.jamjet.audit.enabled=true} (default)</li>
  *   <li>{@link JamjetApprovalAdvisor} + {@link JamjetApprovalController} — when {@code spring.jamjet.approval.enabled=true} (opt-in)</li>
  * </ul>
@@ -58,10 +64,23 @@ public class JamjetAutoConfiguration {
         return new JamjetDurabilityAdvisor(client, properties);
     }
 
+    /**
+     * Adds the JamJet advisors to every auto-configured ChatClient: durability
+     * always, audit and approval when their beans are enabled. Each advisor
+     * orders itself (durability, then audit, then approval).
+     */
     @Bean
     public ChatClientCustomizer jamjetChatClientCustomizer(
-            JamjetDurabilityAdvisor durabilityAdvisor) {
-        return builder -> builder.defaultAdvisors(durabilityAdvisor);
+            JamjetDurabilityAdvisor durabilityAdvisor,
+            ObjectProvider<JamjetAuditAdvisor> auditAdvisor,
+            ObjectProvider<JamjetApprovalAdvisor> approvalAdvisor) {
+        return builder -> {
+            List<Advisor> advisors = new ArrayList<>();
+            advisors.add(durabilityAdvisor);
+            auditAdvisor.ifAvailable(advisors::add);
+            approvalAdvisor.ifAvailable(advisors::add);
+            builder.defaultAdvisors(advisors.toArray(Advisor[]::new));
+        };
     }
 
     // ── Audit ─────────────────────────────────────────────────────────────────

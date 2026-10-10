@@ -8,14 +8,19 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Service bean for querying the JamJet audit trail. Exposes convenient
- * methods for common audit queries — by execution, actor, or event type.
+ * Service bean for querying the runtime's signed, hash-chained audit log
+ * ({@code GET /audit}). Exposes convenient methods for common audit queries:
+ * by execution, actor, or event type.
+ *
+ * <p>The runtime seals approval decisions into this log. The prompt, response and
+ * outcome events the advisors record live in each execution's event log; read
+ * them with {@code JamjetRuntimeClient.listEvents(executionId)}.
  *
  * <pre>{@code
  * @Autowired JamjetAuditService auditService;
  *
  * var trail = auditService.fullTrail("exec-abc123");
- * trail.forEach(e -> log.info("{} {} {}", e.timestamp(), e.eventType(), e.nodeId()));
+ * trail.forEach(e -> log.info("{} {} {}", e.createdAt(), e.eventType(), e.actorId()));
  * }</pre>
  */
 public class JamjetAuditService {

@@ -118,7 +118,7 @@ The decision is recorded on the runtime before the call is released:
 - If the runtime holds a pending approval for the execution, the decision goes to `POST /executions/{id}/approve`. Send the `node_id` and the `action_digest` shown in `/pending` for the request you reviewed. Outside dev mode the runtime requires the digest to approve and refuses a decision made against a request that has since changed.
 - Otherwise it is appended as a `spring_ai.approval_decision` event.
 
-If the runtime refuses the decision or cannot be reached, the endpoint answers with the runtime's status (or 502) and message, and the waiting call is released at once as rejected. Only `"approved"` lets a call through; a timeout applies `default-decision`, and anything other than `approved` rejects. A call that requires approval but has no execution (durability off, or the runtime failed open) is rejected.
+If the runtime refuses the decision or cannot be reached, the endpoint answers with the runtime's status (or 502) and message, and the waiting call is released at once as rejected. Only `"approved"` lets a call through; a timeout applies `default-decision`, and anything other than `approved` rejects. A call marked as requiring approval never runs ungated: `JamjetApprovalGuard` is auto-configured on its own, independently of `durability-enabled` and `approval.enabled`, and refuses the call before the model runs when no approval advisor is on the ChatClient. A call whose execution could not be started (the runtime failed open) is rejected by the approval advisor.
 
 ## Configuration
 

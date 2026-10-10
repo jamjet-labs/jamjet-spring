@@ -132,8 +132,13 @@ public class JamjetApprovalAdvisor implements BaseAdvisor {
     }
 
     private boolean requiresApproval(ChatClientRequest request) {
-        Object required = request.context().get(REQUIRES_APPROVAL_KEY);
-        return Boolean.TRUE.equals(required) || "true".equals(required);
+        return requiresApproval(request.context());
+    }
+
+    /** True when the advisor context marks the call as needing approval. */
+    public static boolean requiresApproval(java.util.Map<String, Object> context) {
+        Object required = context == null ? null : context.get(REQUIRES_APPROVAL_KEY);
+        return Boolean.TRUE.equals(required) || (required instanceof String s && s.equalsIgnoreCase("true"));
     }
 
     static Duration parseTimeout(String timeout) {

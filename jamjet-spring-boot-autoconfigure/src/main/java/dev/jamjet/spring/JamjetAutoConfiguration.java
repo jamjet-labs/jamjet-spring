@@ -155,6 +155,12 @@ public class JamjetAutoConfiguration {
                     + "(spring.jamjet.approval.controller.allow-unauthenticated=true). Anyone who can reach "
                     + "/jamjet/approvals can approve this application's calls. Use this for local development only.");
         }
+        String authority = properties.getApproval().getRequiredAuthority();
+        if (!open && (authority == null || authority.isBlank())) {
+            log.warn("spring.jamjet.approval.required-authority is blank: ANY authenticated user can list and "
+                    + "approve this application's paused calls. Set an authority (default ROLE_JAMJET_APPROVER) "
+                    + "unless /jamjet/approvals is authorized by your own security configuration.");
+        }
         log.info("Registering JamJet approval REST controller at /jamjet/approvals");
         return new JamjetApprovalController(client, waitRegistry, ReviewPolicy.defaults()
                 .withAllowUnauthenticated(open)

@@ -38,4 +38,18 @@ class JamjetApprovalControllerRegistrationTest {
                     assertThat(output).contains("accept UNAUTHENTICATED decisions");
                 });
     }
+
+    @Test
+    void aBlankRequiredAuthorityWarnsThatAnyReviewerCanApprove(CapturedOutput output) {
+        runner.withPropertyValues("spring.jamjet.approval.required-authority=")
+                .run(context -> {
+                    assertThat(context).hasSingleBean(JamjetApprovalController.class);
+                    assertThat(output).contains("spring.jamjet.approval.required-authority is blank");
+                });
+    }
+
+    @Test
+    void theDefaultAuthorityDoesNotWarn(CapturedOutput output) {
+        runner.run(context -> assertThat(output).doesNotContain("required-authority is blank"));
+    }
 }

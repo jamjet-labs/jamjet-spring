@@ -284,14 +284,16 @@ class RuntimeContractIT {
         String memoryId = "it-memory-" + UUID.randomUUID();
         var messages = List.of(UserMessage.from("my name is Ada"), AiMessage.from("Hello Ada"));
 
-        new JamjetChatMemoryStore(client).updateMessages(memoryId, messages);
+        new JamjetChatMemoryStore(client, "it-app").updateMessages(memoryId, messages);
 
         // A fresh store, as after a restart, finds the memory on the runtime.
-        var reopened = new JamjetChatMemoryStore(new JamjetRuntimeClient(props()));
+        var reopened = new JamjetChatMemoryStore(new JamjetRuntimeClient(props()), "it-app");
+        assertThat(new JamjetChatMemoryStore(client, "another-app").getMessages(memoryId))
+                .as("another application on the tenant does not see it").isEmpty();
         assertThat(reopened.getMessages(memoryId)).isEqualTo(messages);
 
         reopened.deleteMessages(memoryId);
-        assertThat(new JamjetChatMemoryStore(client).getMessages(memoryId)).isEmpty();
+        assertThat(new JamjetChatMemoryStore(client, "it-app").getMessages(memoryId)).isEmpty();
     }
 
     interface Assistant {

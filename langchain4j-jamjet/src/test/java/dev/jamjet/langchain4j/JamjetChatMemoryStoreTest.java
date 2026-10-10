@@ -20,7 +20,7 @@ class JamjetChatMemoryStoreTest {
     @BeforeEach
     void setUp() {
         runtime = new StubRuntimeClient();
-        store = new JamjetChatMemoryStore(runtime);
+        store = new JamjetChatMemoryStore(runtime, "app-a");
     }
 
     @Test
@@ -47,7 +47,7 @@ class JamjetChatMemoryStoreTest {
     void aNewStoreFindsMemoryWrittenBeforeARestart() {
         store.updateMessages("session-1", List.of(UserMessage.from("remember me")));
 
-        var afterRestart = new JamjetChatMemoryStore(runtime);
+        var afterRestart = new JamjetChatMemoryStore(runtime, "app-a");
 
         assertThat(afterRestart.getMessages("session-1")).containsExactly(UserMessage.from("remember me"));
     }
@@ -83,9 +83,57 @@ class JamjetChatMemoryStoreTest {
     @Test
     void failOpenReadsEmptyAndDropsWrites() {
         runtime.setUnavailable(true);
-        var lenient = new JamjetChatMemoryStore(runtime, RuntimeErrorMode.FAIL_OPEN);
+        var lenient = new JamjetChatMemoryStore(runtime, "app-a", RuntimeErrorMode.FAIL_OPEN);
 
         lenient.updateMessages("session-1", List.of(UserMessage.from("x")));
         assertThat(lenient.getMessages("session-1")).isEmpty();
+    }
+
+    @Test
+    void twoApplicationsOnOneTenantDoNotShareMemory() {
+        var other = new JamjetChatMemoryStore(runtime, "app-b");
+
+        store.updateMessages("default", List.of(UserMessage.from("a's secret")));
+        other.updateMessages("default", List.of(UserMessage.from("b's note")));
+
+        assertThat(new JamjetChatMemoryStore(runtime, "app-a").getMessages("default"))
+                .containsExactly(UserMessage.from("a's secret"));
+        assertThat(new JamjetChatMemoryStore(runtime, "app-b").getMessages("default"))
+                .containsExactly(UserMessage.from("b's note"));
+    }
+
+    @Test
+    void aNamespaceIsRequired() {
+        assertThatThrownBy(() -> new JamjetChatMemoryStore(runtime, " "))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void aNewConversationScansTheRuntimeOnce() {
+        store.getMessages("new-conversation");
+        store.updateMessages("new-conversation", List.of(UserMessage.from("hi")));
+        store.getMessages("new-conversation");
+
+        assertThat(runtime.listCalls).hasValue(1);
+    }
+
+    @Test
+    void differentConversationsDoNotWaitForEachOthersScan() throws Exception {
+        runtime.listGate = new java.util.concurrent.CountDownLatch(1);
+        var first = java.util.concurrent.CompletableFuture.runAsync(
+                () -> store.updateMessages("one", List.of(UserMessage.from("1"))));
+        var second = java.util.concurrent.CompletableFuture.runAsync(
+                () -> store.updateMessages("two", List.of(UserMessage.from("2"))));
+
+        long deadline = System.nanoTime() + 3_000_000_000L;
+        while (runtime.listingNow.get() < 2 && System.nanoTime() < deadline) {
+            Thread.sleep(5);
+        }
+        int concurrent = runtime.listingNow.get();
+        runtime.listGate.countDown();
+        first.get(5, java.util.concurrent.TimeUnit.SECONDS);
+        second.get(5, java.util.concurrent.TimeUnit.SECONDS);
+
+        assertThat(concurrent).as("two new ids scan at the same time").isEqualTo(2);
     }
 }

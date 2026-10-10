@@ -272,18 +272,23 @@ MyAssistant raw = AiServices.builder(MyAssistant.class)
 MyAssistant recorded = jamjet.wrap(raw, MyAssistant.class);
 ```
 
-**Chat memory on the runtime**: each memory id is one execution of the `langchain4j-chat-memory` workflow; every update appends the full message list as a `chat_memory` event and reads take the latest one.
+**Chat memory on the runtime**: each (namespace, memory id) is one execution of the `langchain4j-chat-memory` workflow; every update appends the full message list as a `chat_memory` event and reads take the latest one. Set the namespace to your application's name, so two applications on one runtime tenant do not read each other's memory under the same id (LangChain4j's default id is `"default"`):
 
 ```java
-var store = jamjet.chatMemoryStore();
+var jamjet = new JamjetConfig()
+    .runtimeUrl("http://localhost:7700")
+    .memoryNamespace("support-bot");
+
 var memory = MessageWindowChatMemory.builder()
-    .chatMemoryStore(store)
+    .chatMemoryStore(jamjet.chatMemoryStore())
     .id("session-1")
     .maxMessages(20)
     .build();
 ```
 
-The runtime has no lookup by input, so the first access to a memory id in a process scans `GET /executions` for it and caches the result.
+The namespace separates applications; it is not access control. Anything holding a token for the tenant can read and append events on any execution.
+
+The runtime has no lookup by input, so the first access to a memory id in a process scans `GET /executions` for it (linear in the tenant's execution count) and caches the result; a miss is cached for 30 seconds, so a new conversation scans once. Keep one writer per memory id: two replicas that both start the same new id each create an execution and the history splits, and after a restart the newest wins.
 
 Both refuse to run unrecorded by default (`JamjetGovernanceException`); `new JamjetConfig().onRuntimeError(RuntimeErrorMode.FAIL_OPEN)` lets calls run and reads fall back to an empty memory instead.
 

@@ -33,6 +33,9 @@ class StubRuntimeClient extends JamjetRuntimeClient {
     private int workflowCalls;
     private boolean unavailable;
     private boolean eventsFail;
+    final java.util.concurrent.atomic.AtomicInteger listCalls = new java.util.concurrent.atomic.AtomicInteger();
+    final java.util.concurrent.atomic.AtomicInteger listingNow = new java.util.concurrent.atomic.AtomicInteger();
+    volatile java.util.concurrent.CountDownLatch listGate;
 
     void setEventsFail(boolean eventsFail) {
         this.eventsFail = eventsFail;
@@ -101,6 +104,18 @@ class StubRuntimeClient extends JamjetRuntimeClient {
     @Override
     public List<ExecutionState> listExecutions(String status, int limit, int offset) {
         checkUp("/executions");
+        listCalls.incrementAndGet();
+        listingNow.incrementAndGet();
+        try {
+            var gate = listGate;
+            if (gate != null) {
+                gate.await(5, java.util.concurrent.TimeUnit.SECONDS);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } finally {
+            listingNow.decrementAndGet();
+        }
         synchronized (executions) {
             var all = new ArrayList<>(executions);
             Collections.reverse(all);

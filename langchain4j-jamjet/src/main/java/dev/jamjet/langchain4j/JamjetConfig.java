@@ -12,6 +12,7 @@ public class JamjetConfig {
     private int connectTimeoutSeconds = 10;
     private int readTimeoutSeconds = 120;
     private RuntimeErrorMode onRuntimeError = RuntimeErrorMode.FAIL_CLOSED;
+    private String memoryNamespace;
 
     public JamjetConfig runtimeUrl(String url) {
         this.runtimeUrl = url;
@@ -58,9 +59,23 @@ public class JamjetConfig {
         return JamjetDurableAgent.wrap(aiService, iface, buildClient(), onRuntimeError);
     }
 
-    /** A chat memory store with this config's client and error mode. */
+    /**
+     * Namespace for chat memory, normally the application's name. Required for
+     * {@link #chatMemoryStore()}: two applications on one runtime tenant with the
+     * same memory id would otherwise read each other's memory.
+     */
+    public JamjetConfig memoryNamespace(String namespace) {
+        this.memoryNamespace = namespace;
+        return this;
+    }
+
+    /** A chat memory store with this config's client, error mode and namespace. */
     public JamjetChatMemoryStore chatMemoryStore() {
-        return new JamjetChatMemoryStore(buildClient(), onRuntimeError);
+        if (memoryNamespace == null || memoryNamespace.isBlank()) {
+            throw new IllegalStateException("set memoryNamespace(...) (normally the application's name) "
+                    + "before creating a chat memory store");
+        }
+        return new JamjetChatMemoryStore(buildClient(), memoryNamespace, onRuntimeError);
     }
 
     public JamjetRuntimeClient buildClient() {

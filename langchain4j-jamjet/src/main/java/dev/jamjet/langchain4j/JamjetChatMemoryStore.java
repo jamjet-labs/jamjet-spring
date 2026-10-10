@@ -13,7 +13,9 @@ import dev.langchain4j.store.memory.chat.ChatMemoryStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.Duration;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -21,15 +23,26 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * A LangChain4j {@link ChatMemoryStore} backed by the JamJet runtime's event log.
  *
- * <p>Each memory id is one execution of the {@code langchain4j-chat-memory}
- * workflow, started on the first write with {@code {"memory_id": id}} as input.
+ * <p>Each (namespace, memory id) is one execution of the {@code langchain4j-chat-memory}
+ * workflow, started on the first write with {@code {"namespace": ns, "memory_id": id}}
+ * as input. The namespace (use the application's name) keeps two applications on
+ * one runtime tenant from reading each other's memory under the same id, such as
+ * LangChain4j's default {@code "default"}. It is not access control: anything
+ * holding a token for the tenant can read and append events on any execution.
  * Every update appends a {@code chat_memory} external event holding the full
  * message list; a delete appends {@code chat_memory_cleared}. Reads take the
  * latest of the two from {@code GET /executions/{id}/events}.
  *
  * <p>The runtime has no lookup by input, so the first access to a memory id in a
  * process scans {@code GET /executions} for its execution and caches the result.
- * The scan is linear in the tenant's execution count.
+ * The scan is linear in the tenant's execution count. A miss is cached too (for
+ * {@link #DEFAULT_MISS_TTL}), so a new conversation scans once. Each id has its
+ * own lock; different conversations never wait for each other's scan.
+ *
+ * <p><b>One writer per memory id.</b> Two processes (replicas) that both write a
+ * new id before either has seen the other's execution each start one, and the
+ * history splits: after a restart the newest wins. Route a conversation to one
+ * replica, or expect that, until the runtime offers a lookup by input.
  *
  * <p>By default a runtime error is thrown
  * ({@link dev.jamjet.spring.JamjetGovernanceException}) rather than read as an
@@ -49,20 +62,43 @@ public class JamjetChatMemoryStore implements ChatMemoryStore {
     /** Correlation key of a memory delete. */
     public static final String CLEARED_EVENT = "chat_memory_cleared";
 
+    /** How long a scan that found nothing is trusted before scanning again. */
+    public static final Duration DEFAULT_MISS_TTL = Duration.ofSeconds(30);
+
     private static final int PAGE = 100;
 
     private final JamjetRuntimeClient client;
+    private final String namespace;
     private final RuntimeErrorMode mode;
+    private final Duration missTtl;
     private final ConcurrentHashMap<String, String> executions = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Instant> misses = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Object> locks = new ConcurrentHashMap<>();
     private volatile boolean registered;
 
-    public JamjetChatMemoryStore(JamjetRuntimeClient client) {
-        this(client, RuntimeErrorMode.FAIL_CLOSED);
+    /** Fail-closed store for this namespace (use the application's name). */
+    public JamjetChatMemoryStore(JamjetRuntimeClient client, String namespace) {
+        this(client, namespace, RuntimeErrorMode.FAIL_CLOSED);
     }
 
-    public JamjetChatMemoryStore(JamjetRuntimeClient client, RuntimeErrorMode mode) {
+    public JamjetChatMemoryStore(JamjetRuntimeClient client, String namespace, RuntimeErrorMode mode) {
+        this(client, namespace, mode, DEFAULT_MISS_TTL);
+    }
+
+    public JamjetChatMemoryStore(JamjetRuntimeClient client, String namespace, RuntimeErrorMode mode,
+                                 Duration missTtl) {
+        if (namespace == null || namespace.isBlank()) {
+            throw new IllegalArgumentException("a namespace is required (use the application's name), so two "
+                    + "applications on one runtime tenant do not share chat memory");
+        }
         this.client = client;
+        this.namespace = namespace;
         this.mode = mode == null ? RuntimeErrorMode.FAIL_CLOSED : mode;
+        this.missTtl = missTtl == null ? DEFAULT_MISS_TTL : missTtl;
+    }
+
+    public String namespace() {
+        return namespace;
     }
 
     @Override
@@ -123,27 +159,52 @@ public class JamjetChatMemoryStore implements ChatMemoryStore {
         if (cached != null) {
             return cached;
         }
-        String found = scan(memoryId);
-        if (found != null) {
-            executions.putIfAbsent(memoryId, found);
-            return executions.get(memoryId);
+        Instant missedAt = misses.get(memoryId);
+        if (missedAt != null && missedAt.plus(missTtl).isAfter(Instant.now())) {
+            return null;
         }
-        return null;
+        synchronized (lockFor(memoryId)) {
+            cached = executions.get(memoryId);
+            if (cached != null) {
+                return cached;
+            }
+            missedAt = misses.get(memoryId);
+            if (missedAt != null && missedAt.plus(missTtl).isAfter(Instant.now())) {
+                return null;
+            }
+            String found = scan(memoryId);
+            if (found != null) {
+                executions.put(memoryId, found);
+                misses.remove(memoryId);
+            } else {
+                misses.put(memoryId, Instant.now());
+            }
+            return found;
+        }
     }
 
-    private synchronized String findOrStart(String memoryId) {
-        String existing = find(memoryId);
-        if (existing != null) {
-            return existing;
+    private String findOrStart(String memoryId) {
+        synchronized (lockFor(memoryId)) {
+            String existing = find(memoryId);
+            if (existing != null) {
+                return existing;
+            }
+            ensureRegistered();
+            var input = new LinkedHashMap<String, Object>();
+            input.put("namespace", namespace);
+            input.put("memory_id", memoryId);
+            var started = client.startExecution(WORKFLOW_ID, RecordedCallWorkflow.VERSION, input);
+            if (started == null || started.executionId() == null || started.executionId().isBlank()) {
+                throw new JamjetClientException("the runtime returned no execution_id", "/executions");
+            }
+            executions.put(memoryId, started.executionId());
+            misses.remove(memoryId);
+            return started.executionId();
         }
-        ensureRegistered();
-        var started = client.startExecution(WORKFLOW_ID, RecordedCallWorkflow.VERSION,
-                Map.of("memory_id", memoryId));
-        if (started == null || started.executionId() == null || started.executionId().isBlank()) {
-            throw new JamjetClientException("the runtime returned no execution_id", "/executions");
-        }
-        executions.put(memoryId, started.executionId());
-        return started.executionId();
+    }
+
+    private Object lockFor(String memoryId) {
+        return locks.computeIfAbsent(memoryId, k -> new Object());
     }
 
     /** The most recently started chat-memory execution for this id, or null. */
@@ -154,6 +215,7 @@ public class JamjetChatMemoryStore implements ChatMemoryStore {
             List<ExecutionState> page = client.listExecutions(null, PAGE, offset);
             for (ExecutionState e : page) {
                 if (WORKFLOW_ID.equals(e.workflowId()) && e.initialInput() != null
+                        && namespace.equals(e.initialInput().get("namespace"))
                         && memoryId.equals(e.initialInput().get("memory_id"))) {
                     if (best == null || (e.startedAt() != null
                             && (bestStarted == null || e.startedAt().isAfter(bestStarted)))) {
@@ -173,7 +235,7 @@ public class JamjetChatMemoryStore implements ChatMemoryStore {
                 "langchain4j.chat_memory.closed", "LangChain4j chat memory", "langchain4j-jamjet");
     }
 
-    private void ensureRegistered() {
+    private synchronized void ensureRegistered() {
         if (!registered) {
             client.createWorkflow(workflowIr());
             registered = true;

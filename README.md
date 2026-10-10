@@ -152,7 +152,7 @@ SecurityFilterChain approvals(HttpSecurity http) throws Exception {
 
 Turning CSRF off is acceptable here only because the decision endpoint accepts `application/json` bodies only, so a cross-site form post is refused (415) even though browsers resend cached Basic credentials. If reviewers sign in with a session or form login, keep CSRF on and send the token with each POST.
 
-For local development without Spring Security, `spring.jamjet.approval.controller.allow-unauthenticated=true` registers the endpoints anyway, logs a warning at startup, and records decisions with approver `unauthenticated`. Anyone who can reach the application can then approve its calls.
+For local development, `spring.jamjet.approval.controller.allow-unauthenticated=true` registers the endpoints even without Spring Security and logs a warning at startup. It switches off every reviewer check, also when Spring Security is present: no principal is required, the authority check is skipped, and anonymous and remember-me principals are accepted. Decisions from anyone who did not really authenticate are recorded with approver `unauthenticated` and `authenticated: false`. Anyone who can reach the application can then approve its calls.
 
 **Approvals the runtime holds are not decided here.** The runtime records the identity of the token that sends a decision and enforces separation of duties on it, so the application never forwards decisions with its own token. `/pending` lists any requests the runtime holds for a waiting call's execution, read-only, with their `action_digest` and the command to run with your own runtime token, for example `jamjet approve exec_... --decision approved --node-id pay --action-digest <digest>`.
 
@@ -178,7 +178,7 @@ On a `ChatClient` built from the auto-configured `ChatClient.Builder`, a call ma
 | `spring.jamjet.approval.required-authority` | `ROLE_JAMJET_APPROVER` | Authority a reviewer must hold to list or decide approvals |
 | `spring.jamjet.approval.allow-unknown-initiator` | `false` | Allow approving a call whose initiator could not be determined |
 | `spring.jamjet.approval.allow-remember-me` | `false` | Accept a remember-me login as a reviewer |
-| `spring.jamjet.approval.controller.allow-unauthenticated` | `false` | Register the approval endpoints without Spring Security (local development only) |
+| `spring.jamjet.approval.controller.allow-unauthenticated` | `false` | Local development only: register the approval endpoints without Spring Security and switch off every reviewer check (principal, authority, anonymous, remember-me) |
 | `spring.jamjet.connect-timeout-seconds` | `10` | Connection timeout |
 | `spring.jamjet.read-timeout-seconds` | `120` | Read timeout |
 

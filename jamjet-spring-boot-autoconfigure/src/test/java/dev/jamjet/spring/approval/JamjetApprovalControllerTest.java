@@ -246,4 +246,33 @@ class JamjetApprovalControllerTest {
     private static List<Map<String, Object>> pending(JamjetApprovalController c, Principal p) {
         return (List<Map<String, Object>>) c.listPending(p).getBody();
     }
+
+    private long voidsAttempted() {
+        return runtime.requests().stream()
+                .filter(r -> r.path().equals(EVENTS) && r.body().contains("spring_ai.approval_decision_void")).count();
+    }
+
+    @Test
+    void aRecordThatMayHaveLandedIsVoidedWhenTheCallIsRejected() throws Exception {
+        // A 5xx or a timeout does not prove the event was not written.
+        runtime.on("POST", EVENTS, 503, "{\"error\":\"upstream timeout\"}");
+        var call = parkedCall("erin");
+
+        var resp = controller.handleApproval("exec_1", approved(), BOB);
+
+        assertThat(resp.getStatusCode().value()).isEqualTo(502);
+        assertThat(call.get(2, TimeUnit.SECONDS).isApproved()).isFalse();
+        assertThat(voidsAttempted()).isEqualTo(1);
+    }
+
+    @Test
+    void aClearRefusalIsNotVoided() throws Exception {
+        runtime.on("POST", EVENTS, 400, "{\"error\":\"invalid execution id: exec_1\"}");
+        var call = parkedCall("erin");
+
+        controller.handleApproval("exec_1", approved(), BOB);
+
+        assertThat(call.get(2, TimeUnit.SECONDS).isApproved()).isFalse();
+        assertThat(voidsAttempted()).isZero();
+    }
 }

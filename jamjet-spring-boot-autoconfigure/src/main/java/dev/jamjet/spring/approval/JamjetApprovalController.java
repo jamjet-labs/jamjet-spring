@@ -170,7 +170,7 @@ public class JamjetApprovalController {
             }
             client.sendExternalEvent(executionId, DECISION_EVENT, payload);
         } catch (JamjetClientException e) {
-            return refused(executionId, e);
+            return refused(executionId, e, recordedApprover, decision.decision());
         }
 
         var forCall = new ApprovalDecision(decision.decision(), null, recordedApprover, decision.comment(), null);
@@ -261,11 +261,19 @@ public class JamjetApprovalController {
     }
 
     /** Release the waiting call as rejected and answer with the runtime's error. */
-    private ResponseEntity<Map<String, Object>> refused(String executionId, JamjetClientException e) {
+    private ResponseEntity<Map<String, Object>> refused(String executionId, JamjetClientException e,
+                                                        String approver, String decision) {
         String message = e.getRuntimeMessage();
         log.warn("Could not record the decision for execution {}: {}", executionId, message);
         waitRegistry.complete(executionId,
                 ApprovalDecision.rejected("jamjet", "the decision could not be recorded: " + message));
+        // Anything but a clear 4xx refusal (a 5xx, a timeout, a dropped connection)
+        // may still have written the event; void it so the record cannot read as
+        // a decision that applied. Best effort: the runtime may be what is failing.
+        if (!e.isClientError()) {
+            voidDecision(executionId, approver, decision,
+                    "recording the decision failed (" + message + "); the call was rejected");
+        }
         HttpStatus status = e.isClientError() ? HttpStatus.valueOf(e.getStatusCode()) : HttpStatus.BAD_GATEWAY;
         return error(status, executionId, message, e.getStatusCode() > 0 ? e.getStatusCode() : null);
     }

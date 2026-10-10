@@ -210,10 +210,10 @@ On a `ChatClient` built from the auto-configured `ChatClient.Builder`, a call ma
 </dependency>
 ```
 
-**Replay tests**: load a recorded execution in JUnit 5:
+**Replay tests**: load an execution recorded on a runtime you already run. Point the extension at it with the `spring.jamjet.runtime-url` system property (default `http://localhost:7700`):
 
 ```java
-@WithJamjetRuntime
+@ExtendWith(JamjetReplayExtension.class)
 class MyAgentTest {
 
     @Test
@@ -227,7 +227,11 @@ class MyAgentTest {
 }
 ```
 
-Event names are the runtime's `kind.type` tags (`node_completed`, `node_failed`, `external_event_received`); `hasEvent` also accepts the PascalCase form.
+```bash
+mvn test -Dspring.jamjet.runtime-url=http://localhost:7700
+```
+
+`@WithJamjetRuntime` starts a fresh, empty runtime container for the test class and sends no token, so it cannot replay an execution recorded elsewhere. Use it when the test creates its own executions.
 
 **Runtime container**: `JamjetTestContainer` runs `jamjetdev/jamjet:0.5.0` in dev mode.
 
@@ -242,22 +246,32 @@ var stub = DeterministicModelStub.builder()
 
 ## Observability
 
-**Micrometer** (on by default when actuator is present):
+The autoconfiguration registers two helper beans. The advisors do not call them, so no metrics or spans appear until your own code does.
 
-```properties
-spring.jamjet.observability.micrometer=true
-spring.jamjet.observability.metric-prefix=jamjet
+**Micrometer**: `JamjetMicrometerBridge` is registered when a `MeterRegistry` bean exists (on by default, set `spring.jamjet.observability.micrometer=false` to turn off). Metric names use `spring.jamjet.observability.metric-prefix` (default `jamjet`).
+
+```java
+@Autowired JamjetMicrometerBridge metrics;
+
+metrics.recordExecutionCompleted("completed", Duration.ofSeconds(4));
+metrics.recordToolCall("search", Duration.ofMillis(120));
+metrics.recordExecutionCost(0.012);
 ```
 
-Metrics: `jamjet.execution.duration`, `jamjet.execution.count`, `jamjet.node.duration`, `jamjet.tool.calls`, `jamjet.execution.cost.usd`
+Meters it records: `jamjet.execution.duration`, `jamjet.execution.count`, `jamjet.node.duration`, `jamjet.node.retries`, `jamjet.tool.calls`, `jamjet.tool.duration`, `jamjet.execution.cost.usd`, `jamjet.audit.events`.
 
-**OpenTelemetry** (opt-in):
+**OpenTelemetry**: `JamjetOtelBridge` is registered only with `spring.jamjet.observability.opentelemetry=true` and an OpenTelemetry `Tracer` bean.
 
-```properties
-spring.jamjet.observability.opentelemetry=true
+```java
+@Autowired JamjetOtelBridge tracing;
+
+Span exec = tracing.startExecutionSpan("exec_1", "my-workflow");
+Span tool = tracing.startToolSpan(exec, "search");
+tracing.endSpan(tool, 0.0);
+tracing.endSpan(exec, 0.012);
 ```
 
-Span hierarchy: `jamjet.execution` → `jamjet.node.{id}` → `jamjet.tool.{name}`
+Span names you build this way: `jamjet.execution`, `jamjet.node.{id}`, `jamjet.tool.{name}`, `jamjet.model.call`.
 
 ## LangChain4j Integration (`langchain4j-jamjet`)
 

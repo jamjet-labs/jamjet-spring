@@ -5,7 +5,7 @@
 > **Maven coordinates remain unchanged**: `dev.jamjet:jamjet-spring-boot-starter`.
 > This repo will receive a redirect README and be archived after the next JVM release confirms a clean Maven publish from the new path.
 
-Spring Boot starter for [JamJet](https://jamjet.dev). Add one dependency and every Spring AI `ChatClient` call is recorded on the JamJet runtime as an execution with an event log, with optional human approval before the model is called.
+Spring Boot starter for [JamJet](https://jamjet.dev). Add one dependency and every call through a `ChatClient` built from the auto-configured `ChatClient.Builder` is recorded on the JamJet runtime as an execution with an event log, with optional human approval before the model is called.
 
 > **Upgrading from 0.1.0:** 0.1.0 called `/api/v1/...` routes the runtime never served. The runtime answered them with its web UI (`200 text/html`), the advisors logged a warning and carried on, and nothing was recorded. 0.2.0 calls the runtime's real routes and refuses calls it cannot record (see [When the runtime is unavailable](#when-the-runtime-is-unavailable)).
 
@@ -27,7 +27,7 @@ Spring Boot starter for [JamJet](https://jamjet.dev). Add one dependency and eve
 docker run -p 7700:8080 -e JAMJET_DEV_MODE=1 jamjetdev/jamjet:0.5.0
 ```
 
-Dev mode turns off authentication and keeps state in memory. Outside dev mode, set `spring.jamjet.api-token`.
+Dev mode turns off authentication. This image keeps state in memory (it sets `STORAGE_BACKEND=memory`); the `jamjet-server` binary defaults to a SQLite file in its working directory, which survives restarts. Outside dev mode, set `spring.jamjet.api-token`.
 
 ### 3. Configure
 
@@ -56,7 +56,7 @@ public class MyApp {
 
 ## What gets recorded
 
-The auto-configured `ChatClientCustomizer` adds these advisors to every auto-configured `ChatClient`:
+The auto-configured `ChatClientCustomizer`s add these advisors to every `ChatClient` built from the auto-configured `ChatClient.Builder` bean. A client built another way (`ChatClient.create(model)`, `ChatClient.builder(model)`) gets none of them, so it is neither recorded nor gated; add the advisor beans to it yourself with `.defaultAdvisors(...)`.
 
 | Advisor | What it does on the runtime |
 |---------|-----------------------------|

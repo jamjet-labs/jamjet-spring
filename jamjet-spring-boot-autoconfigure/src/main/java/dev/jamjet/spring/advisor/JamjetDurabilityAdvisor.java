@@ -4,6 +4,7 @@ import dev.jamjet.spring.JamjetProperties;
 import dev.jamjet.spring.client.JamjetClientException;
 import dev.jamjet.spring.client.JamjetRuntimeClient;
 import dev.jamjet.spring.client.RecordedCallWorkflow;
+import dev.jamjet.spring.client.model.StartExecutionResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClientRequest;
@@ -175,7 +176,20 @@ public class JamjetDurabilityAdvisor implements BaseAdvisor {
             if (properties.getAudit().isIncludePrompts()) {
                 input.put("prompt", extractPrompt(request));
             }
-            var started = client.startExecution(properties.getWorkflowId(), WORKFLOW_VERSION, input);
+            StartExecutionResponse started;
+            try {
+                started = client.startExecution(properties.getWorkflowId(), WORKFLOW_VERSION, input);
+            } catch (JamjetClientException e) {
+                if (e.getStatusCode() != 404) {
+                    throw e;
+                }
+                // The runtime no longer knows the workflow (its store was reset):
+                // register it again and retry once. A second failure fails closed.
+                log.info("Runtime does not know workflow {}; registering it again", properties.getWorkflowId());
+                workflowRegistered = false;
+                ensureWorkflowRegistered();
+                started = client.startExecution(properties.getWorkflowId(), WORKFLOW_VERSION, input);
+            }
             if (started == null || started.executionId() == null || started.executionId().isBlank()) {
                 throw new JamjetClientException("the runtime returned no execution_id", "/executions");
             }

@@ -171,4 +171,15 @@ class JamjetDurableAgentTest {
         assertThat(runtime.getEvents().get(0).payload()).containsEntry("result", "Answer to: visible");
         assertThat(new JamjetConfig().isRecordContent()).isTrue();
     }
+
+    @Test
+    void aRuntimeThatLostTheWorkflowGetsItRegisteredAgain() {
+        TestAssistant durable = JamjetDurableAgent.wrap(new SimpleAssistant(), TestAssistant.class, runtime);
+        durable.answer("first");
+        runtime.forgetWorkflows();
+
+        assertThat(durable.answer("second")).isEqualTo("Answer to: second");
+        assertThat(runtime.getWorkflowCalls()).isEqualTo(2);
+        assertThat(runtime.getExecutionCount()).isEqualTo(2);
+    }
 }

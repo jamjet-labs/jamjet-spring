@@ -6,6 +6,7 @@ import dev.jamjet.spring.client.JamjetRuntimeClient;
 import dev.jamjet.spring.client.RecordedCallWorkflow;
 import dev.jamjet.spring.client.model.ExecutionEvent;
 import dev.jamjet.spring.client.model.ExecutionState;
+import dev.jamjet.spring.client.model.StartExecutionResponse;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.ChatMessageDeserializer;
 import dev.langchain4j.data.message.ChatMessageSerializer;
@@ -193,7 +194,20 @@ public class JamjetChatMemoryStore implements ChatMemoryStore {
             var input = new LinkedHashMap<String, Object>();
             input.put("namespace", namespace);
             input.put("memory_id", memoryId);
-            var started = client.startExecution(WORKFLOW_ID, RecordedCallWorkflow.VERSION, input);
+            StartExecutionResponse started;
+            try {
+                started = client.startExecution(WORKFLOW_ID, RecordedCallWorkflow.VERSION, input);
+            } catch (JamjetClientException e) {
+                if (e.getStatusCode() != 404) {
+                    throw e;
+                }
+                // The runtime forgot the workflow (store reset): register again, retry once.
+                synchronized (this) {
+                    registered = false;
+                }
+                ensureRegistered();
+                started = client.startExecution(WORKFLOW_ID, RecordedCallWorkflow.VERSION, input);
+            }
             if (started == null || started.executionId() == null || started.executionId().isBlank()) {
                 throw new JamjetClientException("the runtime returned no execution_id", "/executions");
             }

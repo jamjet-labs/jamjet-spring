@@ -173,4 +173,34 @@ class JamjetDurabilityAdvisorTest {
         assertThat(chat.prompt("hi").call().content()).isEqualTo("hello");
         assertThat(runtime.requests()).isEmpty();
     }
+
+    @Test
+    void aRuntimeThatLostTheWorkflowGetsItRegisteredAgainOnce() {
+        runtimeAccepts();
+        var chat = chatClient(StubChatModel.answering("hello"));
+        chat.prompt("first").call().content();
+
+        // The runtime's store was reset: it no longer knows the workflow until it is registered again.
+        runtime.on("POST", "/executions", 404, "{\"error\":\"workflow spring-ai-chat v1.0.0\"}");
+        runtime.whenReceived("POST", "/workflows",
+                () -> runtime.on("POST", "/executions", 201, "{\"execution_id\":\"exec_1\"}"));
+
+        assertThat(chat.prompt("second").call().content()).isEqualTo("hello");
+        assertThat(runtime.count("POST", "/workflows")).isEqualTo(2);
+        assertThat(runtime.count("POST", "/executions")).isEqualTo(3);
+    }
+
+    @Test
+    void aWorkflowStillMissingAfterReRegistrationFailsClosed() {
+        runtimeAccepts();
+        var model = StubChatModel.answering("hello");
+        var chat = chatClient(model);
+        chat.prompt("first").call().content();
+        runtime.on("POST", "/executions", 404, "{\"error\":\"workflow spring-ai-chat v1.0.0\"}");
+
+        assertThatThrownBy(() -> chat.prompt("second").call().content())
+                .isInstanceOf(JamjetGovernanceException.class);
+        assertThat(runtime.count("POST", "/workflows")).isEqualTo(2);
+        assertThat(model.calls).hasValue(1);
+    }
 }

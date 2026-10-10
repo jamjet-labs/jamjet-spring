@@ -38,6 +38,7 @@ public final class RecordingRuntime implements AutoCloseable {
     private final HttpServer server;
     private final List<Request> requests = Collections.synchronizedList(new ArrayList<>());
     private final Map<String, Canned> routes = new ConcurrentHashMap<>();
+    private final Map<String, Runnable> triggers = new ConcurrentHashMap<>();
 
     public RecordingRuntime() {
         try {
@@ -52,6 +53,10 @@ public final class RecordingRuntime implements AutoCloseable {
             String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
             requests.add(new Request(exchange.getRequestMethod(), full, body,
                     Map.copyOf(exchange.getRequestHeaders())));
+            Runnable trigger = triggers.get(exchange.getRequestMethod() + " " + full);
+            if (trigger != null) {
+                trigger.run();
+            }
             Canned canned = routes.getOrDefault(exchange.getRequestMethod() + " " + full,
                     new Canned(200, "text/html", "<!doctype html><title>jamjet</title>", 0));
             if (canned.delayMillis() > 0) {
@@ -83,6 +88,16 @@ public final class RecordingRuntime implements AutoCloseable {
     public RecordingRuntime onSlow(String method, String path, int status, String json, long delayMillis) {
         routes.put(method + " " + path, new Canned(status, "application/json", json, delayMillis));
         return this;
+    }
+
+    /** Run {@code action} when {@code method path} arrives, before it is answered. */
+    public RecordingRuntime whenReceived(String method, String path, Runnable action) {
+        triggers.put(method + " " + path, action);
+        return this;
+    }
+
+    public long count(String method, String path) {
+        return requests().stream().filter(r -> r.method().equals(method) && r.path().equals(path)).count();
     }
 
     public String url() {

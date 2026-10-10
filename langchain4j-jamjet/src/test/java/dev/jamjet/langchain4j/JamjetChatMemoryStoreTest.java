@@ -136,4 +136,14 @@ class JamjetChatMemoryStoreTest {
 
         assertThat(concurrent).as("two new ids scan at the same time").isEqualTo(2);
     }
+
+    @Test
+    void aRuntimeThatLostTheWorkflowGetsItRegisteredAgain() {
+        store.updateMessages("a", List.of(UserMessage.from("one")));
+        runtime.forgetWorkflows();
+
+        store.updateMessages("b", List.of(UserMessage.from("two")));
+
+        assertThat(store.getMessages("b")).containsExactly(UserMessage.from("two"));
+    }
 }

@@ -4,6 +4,7 @@ import dev.jamjet.spring.RuntimeErrorMode;
 import dev.jamjet.spring.client.JamjetClientException;
 import dev.jamjet.spring.client.JamjetRuntimeClient;
 import dev.jamjet.spring.client.RecordedCallWorkflow;
+import dev.jamjet.spring.client.model.StartExecutionResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -100,7 +101,18 @@ public final class JamjetDurableAgent {
                 } else {
                     input.put("arg_count", args != null ? args.length : 0);
                 }
-                var started = client.startExecution(WORKFLOW_ID, RecordedCallWorkflow.VERSION, input);
+                StartExecutionResponse started;
+                try {
+                    started = client.startExecution(WORKFLOW_ID, RecordedCallWorkflow.VERSION, input);
+                } catch (JamjetClientException e) {
+                    if (e.getStatusCode() != 404) {
+                        throw e;
+                    }
+                    // The runtime forgot the workflow (store reset): register again, retry once.
+                    registered = false;
+                    ensureRegistered();
+                    started = client.startExecution(WORKFLOW_ID, RecordedCallWorkflow.VERSION, input);
+                }
                 executionId = started != null ? started.executionId() : null;
                 if (executionId == null || executionId.isBlank()) {
                     throw new JamjetClientException("the runtime returned no execution_id", "/executions");

@@ -37,6 +37,11 @@ class StubRuntimeClient extends JamjetRuntimeClient {
     final java.util.concurrent.atomic.AtomicInteger listingNow = new java.util.concurrent.atomic.AtomicInteger();
     volatile java.util.concurrent.CountDownLatch listGate;
 
+    /** Simulate a runtime whose store was reset: it forgets every registered workflow. */
+    void forgetWorkflows() {
+        workflows.clear();
+    }
+
     void setEventsFail(boolean eventsFail) {
         this.eventsFail = eventsFail;
     }

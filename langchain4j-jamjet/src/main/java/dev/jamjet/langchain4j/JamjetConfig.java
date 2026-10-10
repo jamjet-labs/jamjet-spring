@@ -8,7 +8,7 @@ public class JamjetConfig {
 
     private String runtimeUrl = "http://localhost:7700";
     private String apiToken;
-    private String tenantId = "default";
+    private String tenantId;
     private int connectTimeoutSeconds = 10;
     private int readTimeoutSeconds = 120;
     private RuntimeErrorMode onRuntimeError = RuntimeErrorMode.FAIL_CLOSED;
@@ -23,6 +23,11 @@ public class JamjetConfig {
         return this;
     }
 
+    /**
+     * @deprecated ignored: the runtime takes the tenant from the API token
+     *     ({@code default} in dev mode). Kept so existing code compiles.
+     */
+    @Deprecated
     public JamjetConfig tenantId(String id) {
         this.tenantId = id;
         return this;
@@ -62,7 +67,6 @@ public class JamjetConfig {
         var props = new JamjetProperties();
         props.setRuntimeUrl(runtimeUrl);
         props.setApiToken(apiToken);
-        props.setTenantId(tenantId);
         props.setConnectTimeoutSeconds(connectTimeoutSeconds);
         props.setReadTimeoutSeconds(readTimeoutSeconds);
         props.setOnRuntimeError(onRuntimeError);
@@ -71,6 +75,8 @@ public class JamjetConfig {
 
     public String getRuntimeUrl() { return runtimeUrl; }
     public String getApiToken() { return apiToken; }
+    /** @deprecated ignored; see {@link #tenantId(String)}. */
+    @Deprecated
     public String getTenantId() { return tenantId; }
     public int getConnectTimeoutSeconds() { return connectTimeoutSeconds; }
     public int getReadTimeoutSeconds() { return readTimeoutSeconds; }

@@ -8,7 +8,6 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * <pre>{@code
  * spring.jamjet.runtime-url=http://localhost:7700
  * spring.jamjet.api-token=${JAMJET_API_TOKEN}
- * spring.jamjet.tenant-id=default
  * spring.jamjet.durability-enabled=true
  * spring.jamjet.on-runtime-error=fail-closed
  * }</pre>
@@ -22,8 +21,14 @@ public class JamjetProperties {
     /** API token for authentication. */
     private String apiToken;
 
-    /** Tenant ID for multi-tenant isolation. */
-    private String tenantId = "default";
+    /**
+     * Ignored. The runtime takes the tenant from the API token ({@code default}
+     * in dev mode) and never read the {@code X-Tenant-Id} header this used to send.
+     *
+     * @deprecated the API token decides the tenant; setting this logs a warning
+     */
+    @Deprecated
+    private String tenantId;
 
     /** Enable/disable durable execution. */
     private boolean durabilityEnabled = true;
@@ -72,10 +77,14 @@ public class JamjetProperties {
         this.apiToken = apiToken;
     }
 
+    /** @deprecated ignored; the API token decides the tenant. */
+    @Deprecated
     public String getTenantId() {
         return tenantId;
     }
 
+    /** @deprecated ignored; the API token decides the tenant. */
+    @Deprecated
     public void setTenantId(String tenantId) {
         this.tenantId = tenantId;
     }

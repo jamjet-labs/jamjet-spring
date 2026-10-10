@@ -53,6 +53,7 @@ public class JamjetAutoConfiguration {
     @ConditionalOnMissingBean
     public JamjetRuntimeClient jamjetRuntimeClient(JamjetProperties properties) {
         log.info("Configuring JamJet runtime client -> {}", properties.getRuntimeUrl());
+        warnIfTenantIdSet(properties);
         return new JamjetRuntimeClient(properties);
     }
 
@@ -81,6 +82,15 @@ public class JamjetAutoConfiguration {
             approvalAdvisor.ifAvailable(advisors::add);
             builder.defaultAdvisors(advisors.toArray(Advisor[]::new));
         };
+    }
+
+    @SuppressWarnings("deprecation")
+    private static void warnIfTenantIdSet(JamjetProperties properties) {
+        if (properties.getTenantId() != null && !properties.getTenantId().isBlank()) {
+            log.warn("spring.jamjet.tenant-id is ignored: the runtime takes the tenant from the API token "
+                    + "(spring.jamjet.api-token), or uses \"default\" in dev mode. Use a token issued for "
+                    + "the tenant you want and remove spring.jamjet.tenant-id.");
+        }
     }
 
     // ── Audit ─────────────────────────────────────────────────────────────────

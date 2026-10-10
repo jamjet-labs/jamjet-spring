@@ -125,8 +125,7 @@ If the runtime refuses the decision or cannot be reached, the endpoint answers w
 | Property | Default | Description |
 |----------|---------|-------------|
 | `spring.jamjet.runtime-url` | `http://localhost:7700` | JamJet runtime URL |
-| `spring.jamjet.api-token` | none | Bearer token for the runtime |
-| `spring.jamjet.tenant-id` | `default` | Sent as `X-Tenant-Id` |
+| `spring.jamjet.api-token` | none | Bearer token for the runtime. The token decides the tenant; there is no separate tenant setting (`spring.jamjet.tenant-id` is ignored and logs a warning) |
 | `spring.jamjet.durability-enabled` | `true` | Enable the starter |
 | `spring.jamjet.on-runtime-error` | `fail-closed` | `fail-closed` refuses calls the runtime cannot record; `fail-open` runs them unrecorded |
 | `spring.jamjet.workflow-id` | `spring-ai-chat` | Workflow the durability advisor registers |

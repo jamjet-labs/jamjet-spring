@@ -32,7 +32,7 @@ class JamjetAutoConfigurationTest {
         runner.run(context -> {
             var props = context.getBean(JamjetProperties.class);
             assertThat(props.getRuntimeUrl()).isEqualTo("http://localhost:7700");
-            assertThat(props.getTenantId()).isEqualTo("default");
+            assertThat(props.getTenantId()).isNull();
             assertThat(props.isDurabilityEnabled()).isTrue();
         });
     }
@@ -41,13 +41,11 @@ class JamjetAutoConfigurationTest {
     void customPropertiesApplied() {
         runner.withPropertyValues(
                 "spring.jamjet.runtime-url=http://jamjet.prod:7700",
-                "spring.jamjet.tenant-id=acme",
                 "spring.jamjet.api-token=test-token",
                 "spring.jamjet.connect-timeout-seconds=30"
         ).run(context -> {
             var props = context.getBean(JamjetProperties.class);
             assertThat(props.getRuntimeUrl()).isEqualTo("http://jamjet.prod:7700");
-            assertThat(props.getTenantId()).isEqualTo("acme");
             assertThat(props.getApiToken()).isEqualTo("test-token");
             assertThat(props.getConnectTimeoutSeconds()).isEqualTo(30);
         });

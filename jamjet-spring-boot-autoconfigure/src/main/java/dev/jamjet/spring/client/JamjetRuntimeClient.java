@@ -235,9 +235,6 @@ public class JamjetRuntimeClient implements AutoCloseable {
         if (properties.getApiToken() != null && !properties.getApiToken().isBlank()) {
             builder.header("Authorization", "Bearer " + properties.getApiToken());
         }
-        if (properties.getTenantId() != null && !properties.getTenantId().isBlank()) {
-            builder.header("X-Tenant-Id", properties.getTenantId());
-        }
         return builder;
     }
 

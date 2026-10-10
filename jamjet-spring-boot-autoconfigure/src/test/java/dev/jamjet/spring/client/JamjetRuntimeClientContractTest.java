@@ -304,7 +304,10 @@ class JamjetRuntimeClientContractTest {
     }
 
     @Test
-    void sendsTheBearerTokenAndTenantHeaders() {
+    void sendsTheBearerTokenAndNoTenantHeader() {
+        // The runtime takes the tenant from the token (or "default" in dev
+        // mode) and never reads X-Tenant-Id, so sending it would only imply an
+        // isolation that does not exist.
         var props = new JamjetProperties();
         props.setRuntimeUrl(runtime.url() + "/");
         props.setApiToken("tok");
@@ -315,7 +318,7 @@ class JamjetRuntimeClientContractTest {
 
         assertThat(runtime.last().path()).isEqualTo("/executions/exec_1/events");
         assertThat(runtime.last().header("Authorization")).isEqualTo("Bearer tok");
-        assertThat(runtime.last().header("X-Tenant-Id")).isEqualTo("acme");
+        assertThat(runtime.last().header("X-Tenant-Id")).isNull();
     }
 
     @Test

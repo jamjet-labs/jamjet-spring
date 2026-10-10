@@ -47,6 +47,7 @@ public final class StubChatModel implements ChatModel {
     public Flux<ChatResponse> stream(Prompt prompt) {
         return Flux.defer(() -> {
             calls.incrementAndGet();
+            lastPrompt = prompt;
             if (failure != null) {
                 return Flux.error(failure);
             }

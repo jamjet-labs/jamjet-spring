@@ -10,7 +10,10 @@ import dev.jamjet.spring.client.model.ApprovalDecision;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.advisor.api.AdvisorChain;
+import org.springframework.ai.chat.client.ChatClientAttributes;
 import org.springframework.ai.chat.client.advisor.api.BaseAdvisor;
+import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.util.StringUtils;
 import org.springframework.ai.chat.client.advisor.api.StreamAdvisorChain;
 import reactor.core.publisher.Flux;
 import org.springframework.ai.chat.client.ChatClientRequest;
@@ -147,7 +150,7 @@ public class JamjetApprovalAdvisor implements BaseAdvisor {
             // Who triggered the call, if Spring Security knows: that principal
             // cannot approve it (separation of duties, enforced by the controller).
             var context = new ApprovalWaitRegistry.WaitContext(initiator,
-                    ApprovalContent.preview(request.prompt()), ApprovalContent.digest(request.prompt()));
+                    ApprovalContent.preview(effectivePrompt(request)), ApprovalContent.digest(effectivePrompt(request)));
             ApprovalDecision decision = waitRegistry.waitForApproval(executionId, timeout, context,
                     decidingGrace(properties));
 
@@ -178,16 +181,46 @@ public class JamjetApprovalAdvisor implements BaseAdvisor {
      */
     @Override
     public Flux<ChatClientResponse> adviseStream(ChatClientRequest request, StreamAdvisorChain chain) {
-        if (!requiresApproval(request) || request.context().get(INITIATOR_KEY) instanceof CapturedInitiator) {
+        if (!requiresApproval(request)) {
             return BaseAdvisor.super.adviseStream(request, chain);
+        }
+        // Spring AI 1.0's stream path does not append output-format text; mark the
+        // request so before() digests exactly what the stream sends.
+        var streaming = request.mutate().context(STREAMING_KEY, Streaming.INSTANCE).build();
+        if (request.context().get(INITIATOR_KEY) instanceof CapturedInitiator) {
+            return BaseAdvisor.super.adviseStream(streaming, chain);
         }
         String onThisThread = CurrentPrincipal.name();
         return CurrentPrincipal.reactiveName().defaultIfEmpty("")
                 .flatMapMany(reactive -> BaseAdvisor.super.adviseStream(
-                        withInitiator(request, onThisThread != null ? onThisThread
+                        withInitiator(streaming, onThisThread != null ? onThisThread
                                 : reactive.isEmpty() ? null : reactive), chain));
     }
 
+    /** Private marker: the request is on the stream path. */
+    private enum Streaming { INSTANCE }
+
+    private static final String STREAMING_KEY = "jamjet.approval.streaming";
+
+    /**
+     * The prompt the model will actually receive. On the call path Spring AI 1.0's
+     * ChatModelCallAdvisor, which runs after every advisor, appends the
+     * {@code spring.ai.chat.client.output.format} context value (set by
+     * {@code .entity()}, or by any param) to the user message, separated by a line
+     * separator. Apply the same here so the reviewer approves that text too.
+     */
+    static Prompt effectivePrompt(ChatClientRequest request) {
+        Prompt prompt = request.prompt();
+        if (prompt == null || request.context().get(STREAMING_KEY) == Streaming.INSTANCE) {
+            return prompt;
+        }
+        Object format = request.context().get(ChatClientAttributes.OUTPUT_FORMAT.getKey());
+        if (format instanceof String f && StringUtils.hasText(f)) {
+            return prompt.augmentUserMessage(user -> user.mutate()
+                    .text(user.getText() + System.lineSeparator() + f).build());
+        }
+        return prompt;
+    }
     /**
      * The initiator JamJet captured, or the current thread's principal when none
      * was captured. Anything else under {@link #INITIATOR_KEY} was set by the caller

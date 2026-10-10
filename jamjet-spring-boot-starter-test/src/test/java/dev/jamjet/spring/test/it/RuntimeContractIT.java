@@ -190,7 +190,7 @@ class RuntimeContractIT {
         // The reviewer echoes the digest of the prompt they were shown.
         assertThat(listed.get(0)).containsEntry("prompt", "send the wire");
         String digest = (String) listed.get(0).get("content_digest");
-        var resp = controller.handleApproval(executionId, ReviewDecision.approved(digest, "checked"), () -> "alice");
+        var resp = controller.handleApproval(executionId, ReviewDecision.approved(digest, "checked"), approver("alice"));
 
         assertThat(resp.getStatusCode().value()).isEqualTo(200);
         assertThat(resp.getBody()).containsEntry("recorded_as", "external_event")
@@ -360,6 +360,13 @@ class RuntimeContractIT {
     @SuppressWarnings("unchecked")
     private static List<Map<String, Object>> pending(JamjetApprovalController c) {
         // In a real application the reviewer is the request's Spring Security principal.
-        return (List<Map<String, Object>>) c.listPending(() -> "reviewer").getBody();
+        return (List<Map<String, Object>>) c.listPending(approver("reviewer")).getBody();
+    }
+
+    /** A reviewer as Spring Security would present one: authenticated, holding the approver authority. */
+    private static java.security.Principal approver(String name) {
+        return new org.springframework.security.authentication.UsernamePasswordAuthenticationToken(name, "n/a",
+                org.springframework.security.core.authority.AuthorityUtils.createAuthorityList(
+                        dev.jamjet.spring.approval.ReviewPolicy.DEFAULT_AUTHORITY));
     }
 }

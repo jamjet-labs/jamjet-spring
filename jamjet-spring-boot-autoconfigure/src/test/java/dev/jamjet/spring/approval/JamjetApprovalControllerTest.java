@@ -24,7 +24,7 @@ class JamjetApprovalControllerTest {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String APPROVALS = "/executions/exec_1/approvals";
     private static final String EVENTS = "/executions/exec_1/external-event";
-    private static final Principal BOB = () -> "bob";
+    private static final Principal BOB = TestReviewers.approver("bob");
     private static final String DIGEST = "c0ffee";
 
     private static ReviewDecision approved() {
@@ -121,7 +121,7 @@ class JamjetApprovalControllerTest {
         assertThat(registry.isPending("exec_1")).isTrue();
         assertThat(runtime.requests()).isEmpty();
 
-        var other = controller.handleApproval("exec_1", approved(), () -> "carol");
+        var other = controller.handleApproval("exec_1", approved(), TestReviewers.approver("carol"));
         assertThat(other.getStatusCode().value()).isEqualTo(200);
         assertThat(recordedDecision().get("payload").get("initiator").asText()).isEqualTo("bob");
         assertThat(call.get(2, TimeUnit.SECONDS).isApproved()).isTrue();

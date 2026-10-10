@@ -41,6 +41,12 @@ final class Reviewers {
                 return security;
             }
         }
+        String authority = policy.requiredAuthority();
+        if (authority != null && !authority.isBlank()
+                && !(CurrentPrincipal.securityPresent() && Security.holds(principal, authority))) {
+            return Verdict.refuse(403, "approving requires the " + authority + " authority "
+                    + "(spring.jamjet.approval.required-authority)");
+        }
         return Verdict.accept(principal.getName());
     }
 
@@ -58,6 +64,12 @@ final class Reviewers {
                         + "(or set spring.jamjet.approval.allow-remember-me=true)");
             }
             return null;
+        }
+
+        /** True only for an Authentication granted this authority; anything else cannot be checked. */
+        static boolean holds(Principal principal, String authority) {
+            return principal instanceof Authentication auth && auth.getAuthorities() != null
+                    && auth.getAuthorities().stream().anyMatch(a -> authority.equals(a.getAuthority()));
         }
     }
 }

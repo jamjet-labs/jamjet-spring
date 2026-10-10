@@ -61,7 +61,7 @@ class DecisionThatCannotTakeEffectTest {
         // Recording takes a while; the waiting call is interrupted meanwhile.
         runtime.onSlow("POST", EVENTS, 200, "{\"accepted\":true}", 700);
         var decision = CompletableFuture.supplyAsync(
-                () -> controller.handleApproval("exec_1", ReviewDecision.approved("d1", null), () -> "bob"));
+                () -> controller.handleApproval("exec_1", ReviewDecision.approved("d1", null), TestReviewers.approver("bob")));
         Thread.sleep(200);
         waiter.interrupt();
         waiter.join(5000);

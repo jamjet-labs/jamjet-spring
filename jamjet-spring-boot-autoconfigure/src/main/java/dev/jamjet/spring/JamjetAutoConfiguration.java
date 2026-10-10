@@ -158,7 +158,8 @@ public class JamjetAutoConfiguration {
         log.info("Registering JamJet approval REST controller at /jamjet/approvals");
         return new JamjetApprovalController(client, waitRegistry, ReviewPolicy.defaults()
                 .withAllowUnauthenticated(open)
-                .withAllowRememberMe(properties.getApproval().isAllowRememberMe()));
+                .withAllowRememberMe(properties.getApproval().isAllowRememberMe())
+                .withRequiredAuthority(properties.getApproval().getRequiredAuthority()));
     }
 
     /** Spring Security present, or unauthenticated decisions explicitly allowed. */

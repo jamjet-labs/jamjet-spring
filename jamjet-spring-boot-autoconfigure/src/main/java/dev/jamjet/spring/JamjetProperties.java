@@ -232,6 +232,20 @@ public class JamjetProperties {
         @Deprecated
         private String defaultDecision = "rejected";
 
+        /**
+         * Authority a reviewer must hold to list or decide approvals. Blank turns
+         * the check off (only if the application authorizes /jamjet/approvals itself).
+         */
+        private String requiredAuthority = "ROLE_JAMJET_APPROVER";
+
+        public String getRequiredAuthority() {
+            return requiredAuthority;
+        }
+
+        public void setRequiredAuthority(String requiredAuthority) {
+            this.requiredAuthority = requiredAuthority;
+        }
+
         /** Accept a remember-me login as a reviewer. Off: a reviewer must have signed in this session. */
         private boolean allowRememberMe = false;
 

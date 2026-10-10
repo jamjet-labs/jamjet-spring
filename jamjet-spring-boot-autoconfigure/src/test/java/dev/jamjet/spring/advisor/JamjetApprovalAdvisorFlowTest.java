@@ -235,4 +235,23 @@ class JamjetApprovalAdvisorFlowTest {
         assertThat(dev.jamjet.spring.approval.ApprovalContent.digest(model.lastPrompt))
                 .as("what the model ran is what the reviewer approved").isEqualTo(reviewed);
     }
+
+    @Test
+    void aSecondCallWaitingOnTheSameExecutionIsRefusedNotMerged() throws Exception {
+        runtime.on("POST", EVENTS, 200, "{\"execution_id\":\"exec_1\",\"accepted\":true}");
+        var first = pausedCall("exec_1");
+
+        // A second call that names the same execution id (durability off, caller-supplied id).
+        assertThatThrownBy(() -> chat.prompt("wire 1000000")
+                .advisors(a -> a.param(JamjetApprovalAdvisor.REQUIRES_APPROVAL_KEY, true)
+                        .param(JamjetDurabilityAdvisor.EXECUTION_ID_KEY, "exec_1"))
+                .call().content())
+                .isInstanceOf(ApprovalRejectedException.class)
+                .hasMessageContaining("already waiting");
+        assertThat(registry.context("exec_1").promptPreview()).contains("wire 100").doesNotContain("1000000");
+
+        registry.complete("exec_1", ApprovalDecision.approved("dave", null));
+        assertThat(first.get(5, TimeUnit.SECONDS)).isEqualTo("hello");
+        assertThat(model.calls).as("one decision released one call").hasValue(1);
+    }
 }

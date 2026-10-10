@@ -151,8 +151,12 @@ public class JamjetApprovalAdvisor implements BaseAdvisor {
             // cannot approve it (separation of duties, enforced by the controller).
             var context = new ApprovalWaitRegistry.WaitContext(initiator,
                     ApprovalContent.preview(effectivePrompt(request)), ApprovalContent.digest(effectivePrompt(request)));
-            ApprovalDecision decision = waitRegistry.waitForApproval(executionId, timeout, context,
-                    decidingGrace(properties));
+            ApprovalDecision decision;
+            try {
+                decision = waitRegistry.waitForApproval(executionId, timeout, context, decidingGrace(properties));
+            } catch (IllegalStateException alreadyWaiting) {
+                throw new ApprovalRejectedException(executionId, alreadyWaiting.getMessage());
+            }
 
             // Only an explicit "approved" lets the call through.
             if (decision == null || !decision.isApproved()) {

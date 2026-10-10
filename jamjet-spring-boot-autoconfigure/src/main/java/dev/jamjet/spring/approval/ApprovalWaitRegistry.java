@@ -71,9 +71,14 @@ public class ApprovalWaitRegistry {
     public ApprovalDecision waitForApproval(String executionId, Duration timeout, WaitContext context,
                                             Duration decidingGrace)
             throws TimeoutException, InterruptedException {
-        var waiter = pending.computeIfAbsent(executionId,
-                k -> new Waiter(new CompletableFuture<>(), Instant.now(),
-                        context == null ? WaitContext.NONE : context, new AtomicReference<>(State.WAITING)));
+        var waiter = new Waiter(new CompletableFuture<>(), Instant.now(),
+                context == null ? WaitContext.NONE : context, new AtomicReference<>(State.WAITING));
+        if (pending.putIfAbsent(executionId, waiter) != null) {
+            // Never share a wait: one decision would release both calls, and only
+            // the first call's content would have been reviewed.
+            throw new IllegalStateException("another call is already waiting for approval on execution "
+                    + executionId);
+        }
         try {
             try {
                 return waiter.decision().get(timeout.toMillis(), TimeUnit.MILLISECONDS);

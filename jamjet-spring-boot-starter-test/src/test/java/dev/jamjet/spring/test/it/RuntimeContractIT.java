@@ -269,7 +269,14 @@ class RuntimeContractIT {
         // no tokens and records user_id; with auth on it records the token's
         // name and ignores user_id. This assertion is the dev-mode form.
         client.approveExecution(executionId, new ApprovalDecision("approved", "dispatch", "alice", "reviewed", digest));
+        // GET /approvals serves a projection that lags the write path by up to
+        // one projector tick (~500 ms), so read until it catches up.
         var after = client.listApprovals(executionId);
+        long settle = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (!after.pending().isEmpty() && System.nanoTime() < settle) {
+            Thread.sleep(100);
+            after = client.listApprovals(executionId);
+        }
         assertThat(after.pending()).isEmpty();
         assertThat(after.decided()).singleElement()
                 .satisfies(d -> assertThat(d).containsEntry("status", "approved").containsEntry("user_id", "alice"));

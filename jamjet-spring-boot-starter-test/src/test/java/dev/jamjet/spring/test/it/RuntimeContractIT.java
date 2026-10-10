@@ -187,7 +187,10 @@ class RuntimeContractIT {
         assertThat(listed.get(0)).doesNotContainKeys("runtime_error", "runtime_requests");
 
         // The reviewer is the authenticated principal (Spring Security in a real app).
-        var resp = controller.handleApproval(executionId, ReviewDecision.approved("checked"), () -> "alice");
+        // The reviewer echoes the digest of the prompt they were shown.
+        assertThat(listed.get(0)).containsEntry("prompt", "send the wire");
+        String digest = (String) listed.get(0).get("content_digest");
+        var resp = controller.handleApproval(executionId, ReviewDecision.approved(digest, "checked"), () -> "alice");
 
         assertThat(resp.getStatusCode().value()).isEqualTo(200);
         assertThat(resp.getBody()).containsEntry("recorded_as", "external_event")
@@ -199,7 +202,7 @@ class RuntimeContractIT {
                 .containsSubsequence("spring_ai.approval_requested", "spring_ai.approval_decision", "spring_ai.completed");
         assertThat(external(events, "spring_ai.approval_decision").payload())
                 .containsEntry("decision", "approved").containsEntry("approver", "alice")
-                .containsEntry("authenticated", true);
+                .containsEntry("authenticated", true).containsEntry("content_digest", digest);
     }
 
     @Test

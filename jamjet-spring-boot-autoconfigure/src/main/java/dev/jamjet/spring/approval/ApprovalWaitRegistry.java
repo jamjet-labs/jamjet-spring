@@ -24,9 +24,12 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 public class ApprovalWaitRegistry {
 
-    /** What the paused call carries for its reviewer. {@code initiator} is null when unknown. */
-    public record WaitContext(String initiator) {
-        public static final WaitContext NONE = new WaitContext(null);
+    /**
+     * What the paused call carries for its reviewer: who triggered it (null when
+     * unknown), a bounded preview of the prompt, and the digest a decision must echo.
+     */
+    public record WaitContext(String initiator, String promptPreview, String contentDigest) {
+        public static final WaitContext NONE = new WaitContext(null, null, null);
     }
 
     private enum State { WAITING, DECIDING, TIMED_OUT }

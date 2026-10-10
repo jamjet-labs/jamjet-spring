@@ -73,7 +73,7 @@ class ApprovalDecisionRaceTest {
         // Recording the decision takes longer than what is left of the timeout.
         runtime.onSlow("POST", EVENTS, 200, "{\"accepted\":true}", 2000);
 
-        var resp = controller.handleApproval("exec_1", ReviewDecision.approved(null), () -> "bob");
+        var resp = controller.handleApproval("exec_1", ReviewDecision.approved(registry.context("exec_1").contentDigest(), null), () -> "bob");
 
         assertThat(resp.getStatusCode().value()).isEqualTo(200);
         // What the runtime recorded and what the call did must agree.
@@ -87,10 +87,11 @@ class ApprovalDecisionRaceTest {
         var call = pausedCall();
         runtime.onSlow("POST", EVENTS, 200, "{\"accepted\":true}", 500);
 
+        String digest = registry.context("exec_1").contentDigest();
         var approve = CompletableFuture.supplyAsync(
-                () -> controller.handleApproval("exec_1", ReviewDecision.approved(null), () -> "bob"));
+                () -> controller.handleApproval("exec_1", ReviewDecision.approved(digest, null), () -> "bob"));
         var reject = CompletableFuture.supplyAsync(
-                () -> controller.handleApproval("exec_1", ReviewDecision.rejected(null), () -> "carol"));
+                () -> controller.handleApproval("exec_1", ReviewDecision.rejected(digest, null), () -> "carol"));
 
         var statuses = List.of(approve.get(5, TimeUnit.SECONDS).getStatusCode().value(),
                 reject.get(5, TimeUnit.SECONDS).getStatusCode().value());

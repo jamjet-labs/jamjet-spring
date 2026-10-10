@@ -15,6 +15,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public final class StubChatModel implements ChatModel {
 
     public final AtomicInteger calls = new AtomicInteger();
+    public volatile Prompt lastPrompt;
     private final String answer;
     private final RuntimeException failure;
 
@@ -34,6 +35,7 @@ public final class StubChatModel implements ChatModel {
     @Override
     public ChatResponse call(Prompt prompt) {
         calls.incrementAndGet();
+        lastPrompt = prompt;
         if (failure != null) {
             throw failure;
         }

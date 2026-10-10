@@ -122,14 +122,16 @@ chatClient.prompt("Send the wire")
 The call records `spring_ai.approval_requested` on its execution and blocks until a reviewer decides through the approval endpoints:
 
 ```bash
-# Calls waiting for a decision
+# Calls waiting for a decision, each with its prompt and content_digest
 curl -u reviewer:secret http://localhost:8080/jamjet/approvals/pending
 
 # Decide
 curl -u reviewer:secret -X POST http://localhost:8080/jamjet/approvals/{executionId} \
   -H 'Content-Type: application/json' \
-  -d '{"decision":"approved","comment":"checked"}'
+  -d '{"decision":"approved","content_digest":"<from /pending>","comment":"checked"}'
 ```
+
+**A decision is bound to what was reviewed.** `/pending` shows each call's prompt (escaped and cut at 2000 characters) and a `content_digest` over every message of the prompt. A decision must echo that digest: without it the answer is 400, with a different one 409, and nothing is recorded. The approval advisor runs last before the model, so no other advisor can change the prompt after it was approved. Only one decision applies to a call: a second or late one gets 409 and records nothing.
 
 **Reviewers must be authenticated.** The approver recorded on the runtime is the authenticated principal of the request; the body cannot name it, and a request with no principal gets 401 and releases nothing. The principal that triggered a call, when Spring Security knows it at call time, cannot approve that call (403). The endpoints are registered only when Spring Security is on the classpath. Protect them with a role, for example:
 

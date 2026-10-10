@@ -2,6 +2,7 @@ package dev.jamjet.spring.advisor;
 
 import dev.jamjet.spring.JamjetProperties;
 import dev.jamjet.spring.approval.ApprovalWaitRegistry;
+import dev.jamjet.spring.approval.ApprovalContent;
 import dev.jamjet.spring.approval.CurrentPrincipal;
 import dev.jamjet.spring.client.JamjetClientException;
 import dev.jamjet.spring.client.JamjetRuntimeClient;
@@ -66,8 +67,9 @@ public class JamjetApprovalAdvisor implements BaseAdvisor {
 
     @Override
     public int getOrder() {
-        // After audit (-50), before the LLM call
-        return Ordered.LOWEST_PRECEDENCE - 30;
+        // Last before the model call, so no advisor can rewrite the prompt after
+        // the reviewer approved its digest.
+        return Ordered.LOWEST_PRECEDENCE - 1;
     }
 
     @Override
@@ -100,7 +102,8 @@ public class JamjetApprovalAdvisor implements BaseAdvisor {
             Duration timeout = parseTimeout(properties.getApproval().getTimeout());
             // Who triggered the call, if Spring Security knows: that principal
             // cannot approve it (separation of duties, enforced by the controller).
-            var context = new ApprovalWaitRegistry.WaitContext(CurrentPrincipal.name());
+            var context = new ApprovalWaitRegistry.WaitContext(CurrentPrincipal.name(),
+                    ApprovalContent.preview(request.prompt()), ApprovalContent.digest(request.prompt()));
             ApprovalDecision decision = waitRegistry.waitForApproval(executionId, timeout, context);
 
             // Only an explicit "approved" lets the call through.

@@ -28,7 +28,8 @@ import java.util.Map;
  * <ul>
  *   <li>{@code GET /jamjet/approvals/pending}: calls waiting here, plus, read-only,
  *       any approval requests the runtime itself holds for their executions.</li>
- *   <li>{@code POST /jamjet/approvals/{executionId}}: body {@code {decision, comment?}}.</li>
+ *   <li>{@code POST /jamjet/approvals/{executionId}}: body {@code {decision, content_digest, comment?}}.
+ *       The digest binds the decision to the prompt the reviewer was shown.</li>
  * </ul>
  *
  * <p><b>Who decides.</b> The approver is the authenticated principal of the
@@ -103,6 +104,14 @@ public class JamjetApprovalController {
                             + "An approval the runtime holds is decided with your own runtime token, never "
                             + "through this endpoint: see GET /jamjet/approvals/pending for the command", null);
         }
+        if (decision.contentDigest() == null || decision.contentDigest().isBlank()) {
+            return error(HttpStatus.BAD_REQUEST, executionId, "content_digest is required: echo the "
+                    + "content_digest GET /jamjet/approvals/pending showed for the call you reviewed", null);
+        }
+        if (!decision.contentDigest().equals(waiting.contentDigest())) {
+            return error(HttpStatus.CONFLICT, executionId, "content_digest does not match the waiting call; "
+                    + "re-read GET /jamjet/approvals/pending and decide again", null);
+        }
         if (approver != null && approver.equals(waiting.initiator()) && "approved".equals(decision.decision())) {
             return error(HttpStatus.FORBIDDEN, executionId,
                     "separation of duties: " + approver + " triggered this call and cannot approve it", null);
@@ -124,6 +133,7 @@ public class JamjetApprovalController {
             if (waiting.initiator() != null) {
                 payload.put("initiator", waiting.initiator());
             }
+            payload.put("content_digest", decision.contentDigest());
             if (decision.comment() != null) {
                 payload.put("comment", decision.comment());
             }
@@ -158,6 +168,8 @@ public class JamjetApprovalController {
             if (waiting.context().initiator() != null) {
                 item.put("initiator", waiting.context().initiator());
             }
+            item.put("prompt", waiting.context().promptPreview());
+            item.put("content_digest", waiting.context().contentDigest());
             try {
                 var requests = new ArrayList<Map<String, Object>>();
                 for (PendingApproval p : client.listApprovals(waiting.executionId()).pending()) {

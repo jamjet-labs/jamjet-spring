@@ -25,6 +25,11 @@ class JamjetApprovalControllerTest {
     private static final String APPROVALS = "/executions/exec_1/approvals";
     private static final String EVENTS = "/executions/exec_1/external-event";
     private static final Principal BOB = () -> "bob";
+    private static final String DIGEST = "c0ffee";
+
+    private static ReviewDecision approved() {
+        return new ReviewDecision("approved", null, DIGEST);
+    }
 
     private RecordingRuntime runtime;
     private ApprovalWaitRegistry registry;
@@ -52,7 +57,7 @@ class JamjetApprovalControllerTest {
         var future = CompletableFuture.supplyAsync(() -> {
             try {
                 return registry.waitForApproval("exec_1", Duration.ofSeconds(30),
-                        new ApprovalWaitRegistry.WaitContext(initiator));
+                        new ApprovalWaitRegistry.WaitContext(initiator, "send 100 to acct 42", DIGEST));
             } catch (Exception e) {
                 throw new RuntimeException(e);
             }
@@ -78,7 +83,7 @@ class JamjetApprovalControllerTest {
         runtime.on("POST", EVENTS, 200, "{\"accepted\":true}");
         var call = parkedCall(null);
 
-        var resp = controller.handleApproval("exec_1", ReviewDecision.approved(null), null);
+        var resp = controller.handleApproval("exec_1", approved(), null);
 
         assertThat(resp.getStatusCode().value()).isEqualTo(401);
         assertThat(registry.isPending("exec_1")).isTrue();
@@ -92,7 +97,7 @@ class JamjetApprovalControllerTest {
         runtime.on("POST", EVENTS, 200, "{\"accepted\":true}");
         var call = parkedCall(null);
         // An older client still sends user_id; it must not be what is recorded.
-        var body = JSON.readValue("{\"decision\":\"approved\",\"user_id\":\"alice\",\"comment\":\"ok\"}",
+        var body = JSON.readValue("{\"decision\":\"approved\",\"user_id\":\"alice\",\"comment\":\"ok\",\"content_digest\":\"c0ffee\"}",
                 ReviewDecision.class);
 
         var resp = controller.handleApproval("exec_1", body, BOB);
@@ -110,13 +115,13 @@ class JamjetApprovalControllerTest {
         runtime.on("POST", EVENTS, 200, "{\"accepted\":true}");
         var call = parkedCall("bob");
 
-        var resp = controller.handleApproval("exec_1", ReviewDecision.approved(null), BOB);
+        var resp = controller.handleApproval("exec_1", approved(), BOB);
 
         assertThat(resp.getStatusCode().value()).isEqualTo(403);
         assertThat(registry.isPending("exec_1")).isTrue();
         assertThat(runtime.requests()).isEmpty();
 
-        var other = controller.handleApproval("exec_1", ReviewDecision.approved(null), () -> "carol");
+        var other = controller.handleApproval("exec_1", approved(), () -> "carol");
         assertThat(other.getStatusCode().value()).isEqualTo(200);
         assertThat(recordedDecision().get("payload").get("initiator").asText()).isEqualTo("bob");
         assertThat(call.get(2, TimeUnit.SECONDS).isApproved()).isTrue();
@@ -127,7 +132,7 @@ class JamjetApprovalControllerTest {
         runtime.on("GET", APPROVALS, 200,
                 "{\"pending\":[{\"node_id\":\"pay\",\"context\":{\"action_digest\":\"d\"}}],\"decided\":[]}");
 
-        var resp = controller.handleApproval("exec_1", ReviewDecision.approved(null), BOB);
+        var resp = controller.handleApproval("exec_1", approved(), BOB);
 
         assertThat(resp.getStatusCode().value()).isEqualTo(404);
         assertThat((String) resp.getBody().get("error")).contains("your own runtime token");
@@ -139,7 +144,7 @@ class JamjetApprovalControllerTest {
         runtime.on("POST", EVENTS, 500, "{\"error\":\"backend error: disk full\"}");
         var call = parkedCall(null);
 
-        var resp = controller.handleApproval("exec_1", ReviewDecision.approved(null), BOB);
+        var resp = controller.handleApproval("exec_1", approved(), BOB);
 
         assertThat(resp.getStatusCode().value()).isEqualTo(502);
         assertThat(resp.getBody()).containsEntry("error", "backend error: disk full");
@@ -151,7 +156,7 @@ class JamjetApprovalControllerTest {
         runtime.on("POST", EVENTS, 400, "{\"error\":\"invalid execution id: exec_1\"}");
         var call = parkedCall(null);
 
-        var resp = controller.handleApproval("exec_1", ReviewDecision.approved(null), BOB);
+        var resp = controller.handleApproval("exec_1", approved(), BOB);
 
         assertThat(resp.getStatusCode().value()).isEqualTo(400);
         assertThat(call.get(2, TimeUnit.SECONDS).isApproved()).isFalse();
@@ -159,7 +164,7 @@ class JamjetApprovalControllerTest {
 
     @Test
     void aDecisionOtherThanApprovedOrRejectedIsABadRequest() {
-        var resp = controller.handleApproval("exec_1", new ReviewDecision("yes", null), BOB);
+        var resp = controller.handleApproval("exec_1", new ReviewDecision("yes", null, DIGEST), BOB);
 
         assertThat(resp.getStatusCode().value()).isEqualTo(400);
         assertThat(runtime.requests()).isEmpty();
@@ -171,7 +176,7 @@ class JamjetApprovalControllerTest {
         var open = new JamjetApprovalController(client, registry, true);
         var call = parkedCall(null);
 
-        var resp = open.handleApproval("exec_1", ReviewDecision.approved(null), null);
+        var resp = open.handleApproval("exec_1", approved(), null);
 
         assertThat(resp.getStatusCode().value()).isEqualTo(200);
         var payload = recordedDecision().get("payload");
@@ -202,6 +207,37 @@ class JamjetApprovalControllerTest {
             });
         });
         assertThat(runtime.requests()).noneMatch(r -> r.method().equals("POST"));
+        registry.complete("exec_1", ApprovalDecision.rejected("t", "cleanup"));
+        call.get(2, TimeUnit.SECONDS);
+    }
+
+    @Test
+    void aDecisionMustEchoTheContentDigestTheReviewerWasShown() throws Exception {
+        runtime.on("POST", EVENTS, 200, "{\"accepted\":true}");
+        var call = parkedCall(null);
+
+        var missing = controller.handleApproval("exec_1", new ReviewDecision("approved", null, null), BOB);
+        var stale = controller.handleApproval("exec_1", new ReviewDecision("approved", null, "beef"), BOB);
+
+        assertThat(missing.getStatusCode().value()).isEqualTo(400);
+        assertThat(stale.getStatusCode().value()).isEqualTo(409);
+        assertThat(runtime.requests()).isEmpty();
+        assertThat(registry.isPending("exec_1")).isTrue();
+
+        var ok = controller.handleApproval("exec_1", approved(), BOB);
+        assertThat(ok.getStatusCode().value()).isEqualTo(200);
+        assertThat(recordedDecision().get("payload").get("content_digest").asText()).isEqualTo(DIGEST);
+        assertThat(call.get(2, TimeUnit.SECONDS).isApproved()).isTrue();
+    }
+
+    @Test
+    void thePendingListShowsWhatIsBeingApproved() throws Exception {
+        runtime.on("GET", APPROVALS, 200, "{\"pending\":[],\"decided\":[]}");
+        var call = parkedCall(null);
+
+        var item = controller.listPending().getBody().get(0);
+
+        assertThat(item).containsEntry("prompt", "send 100 to acct 42").containsEntry("content_digest", DIGEST);
         registry.complete("exec_1", ApprovalDecision.rejected("t", "cleanup"));
         call.get(2, TimeUnit.SECONDS);
     }

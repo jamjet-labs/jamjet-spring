@@ -3,23 +3,48 @@ package dev.jamjet.langchain4j;
 import dev.jamjet.spring.JamjetProperties;
 import dev.jamjet.spring.client.JamjetClientException;
 import dev.jamjet.spring.client.JamjetRuntimeClient;
-import dev.jamjet.spring.client.model.AuditEntry;
-import dev.jamjet.spring.client.model.AuditPage;
 import dev.jamjet.spring.client.model.CreateWorkflowResponse;
+import dev.jamjet.spring.client.model.ExecutionEvent;
+import dev.jamjet.spring.client.model.ExecutionState;
 import dev.jamjet.spring.client.model.StartExecutionResponse;
 
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
+/**
+ * An in-memory stand-in for the runtime that refuses what the real one refuses:
+ * IR without workflow_id/version/start_node-in-nodes/edges-as-list (400),
+ * executions of unregistered workflows (404), and execution ids that are not
+ * {@code exec_<uuid>} (400, as {@code parse_execution_id} does).
+ */
 class StubRuntimeClient extends JamjetRuntimeClient {
 
+    record RecordedEvent(String executionId, String correlationKey, Map<String, Object> payload) {}
+
+    private final Map<String, Map<String, Object>> workflows = Collections.synchronizedMap(new HashMap<>());
+    private final List<ExecutionState> executions = Collections.synchronizedList(new ArrayList<>());
     private final List<RecordedEvent> events = Collections.synchronizedList(new ArrayList<>());
-    private int workflowCounter = 0;
-    private int executionCounter = 0;
-    private boolean unavailable = false;
+    private int workflowCalls;
+    private boolean unavailable;
+    private boolean eventsFail;
+    final java.util.concurrent.atomic.AtomicInteger listCalls = new java.util.concurrent.atomic.AtomicInteger();
+    final java.util.concurrent.atomic.AtomicInteger listingNow = new java.util.concurrent.atomic.AtomicInteger();
+    volatile java.util.concurrent.CountDownLatch listGate;
+
+    /** Simulate a runtime whose store was reset: it forgets every registered workflow. */
+    void forgetWorkflows() {
+        workflows.clear();
+    }
+
+    void setEventsFail(boolean eventsFail) {
+        this.eventsFail = eventsFail;
+    }
 
     StubRuntimeClient() {
         super(defaultProps());
@@ -29,42 +54,110 @@ class StubRuntimeClient extends JamjetRuntimeClient {
         this.unavailable = unavailable;
     }
 
+    private void checkUp(String path) {
+        if (unavailable) {
+            throw new JamjetClientException(503, "{\"error\":\"unavailable\"}", path);
+        }
+    }
+
+    private static UUID parseExecutionId(String id, String path) {
+        String hex = id.startsWith("exec_") ? id.substring(5) : id;
+        try {
+            if (hex.length() == 32) {
+                hex = hex.replaceFirst("(\\p{XDigit}{8})(\\p{XDigit}{4})(\\p{XDigit}{4})(\\p{XDigit}{4})(\\p{XDigit}+)",
+                        "$1-$2-$3-$4-$5");
+            }
+            return UUID.fromString(hex);
+        } catch (IllegalArgumentException e) {
+            throw new JamjetClientException(400, "{\"error\":\"invalid execution id: " + id + "\"}", path);
+        }
+    }
+
     @Override
     public CreateWorkflowResponse createWorkflow(Map<String, Object> ir) {
-        if (unavailable) throw new JamjetClientException(503, "unavailable", "/api/v1/workflows");
-        workflowCounter++;
-        return new CreateWorkflowResponse("wf-" + workflowCounter, "1");
+        checkUp("/workflows");
+        workflowCalls++;
+        Object id = ir.get("workflow_id");
+        Object version = ir.get("version");
+        Object start = ir.get("start_node");
+        Object nodes = ir.get("nodes");
+        if (!(id instanceof String) || !(version instanceof String)) {
+            throw new JamjetClientException(400, "{\"error\":\"ir.workflow_id is required\"}", "/workflows");
+        }
+        if (!(nodes instanceof Map<?, ?> n) || !(start instanceof String s) || !n.containsKey(s)
+                || !(ir.get("edges") instanceof List<?>)) {
+            throw new JamjetClientException(400, "{\"error\":\"invalid workflow IR\"}", "/workflows");
+        }
+        workflows.put(id + "@" + version, ir);
+        return new CreateWorkflowResponse((String) id, (String) version);
     }
 
     @Override
     public StartExecutionResponse startExecution(String workflowId, String version, Map<String, Object> input) {
-        if (unavailable) throw new JamjetClientException(503, "unavailable", "/api/v1/executions");
-        executionCounter++;
-        return new StartExecutionResponse("exec-" + executionCounter);
+        checkUp("/executions");
+        String v = version == null ? "1.0.0" : version;
+        if (!workflows.containsKey(workflowId + "@" + v)) {
+            throw new JamjetClientException(404, "{\"error\":\"workflow " + workflowId + " v" + v + "\"}",
+                    "/executions");
+        }
+        var uuid = UUID.randomUUID();
+        executions.add(new ExecutionState(uuid.toString(), workflowId, v, "running",
+                new LinkedHashMap<>(input), new LinkedHashMap<>(input), Instant.now(), Instant.now(), null));
+        return new StartExecutionResponse("exec_" + uuid.toString().replace("-", ""));
+    }
+
+    @Override
+    public List<ExecutionState> listExecutions(String status, int limit, int offset) {
+        checkUp("/executions");
+        listCalls.incrementAndGet();
+        listingNow.incrementAndGet();
+        try {
+            var gate = listGate;
+            if (gate != null) {
+                gate.await(5, java.util.concurrent.TimeUnit.SECONDS);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } finally {
+            listingNow.decrementAndGet();
+        }
+        synchronized (executions) {
+            var all = new ArrayList<>(executions);
+            Collections.reverse(all);
+            return all.subList(Math.min(offset, all.size()), Math.min(offset + limit, all.size()));
+        }
     }
 
     @Override
     public void sendExternalEvent(String executionId, String correlationKey, Map<String, Object> payload) {
-        if (unavailable) throw new JamjetClientException(503, "unavailable", "/external-event");
+        checkUp("/executions/" + executionId + "/external-event");
+        if (eventsFail) {
+            throw new JamjetClientException(503, "{\"error\":\"event store unavailable\"}",
+                    "/executions/" + executionId + "/external-event");
+        }
+        parseExecutionId(executionId, "/executions/" + executionId + "/external-event");
         events.add(new RecordedEvent(executionId, correlationKey, payload));
     }
 
     @Override
-    public AuditPage queryAudit(String executionId, String actorId, String eventType, int limit, int offset) {
-        if (unavailable) throw new JamjetClientException(503, "unavailable", "/api/v1/audit");
-        var matching = events.stream()
-                .filter(e -> executionId == null || executionId.equals(e.executionId))
-                .filter(e -> eventType == null || eventType.equals(e.correlationKey))
-                .map(e -> new AuditEntry(
-                        "audit-" + events.indexOf(e),
-                        e.executionId,
-                        e.correlationKey,
-                        null,
-                        null,
-                        e.payload,
-                        Instant.now()))
-                .toList();
-        return new AuditPage(matching, matching.size(), limit, offset);
+    public List<ExecutionEvent> listEvents(String executionId) {
+        checkUp("/executions/" + executionId + "/events");
+        UUID wanted = parseExecutionId(executionId, "/executions/" + executionId + "/events");
+        var out = new ArrayList<ExecutionEvent>();
+        long seq = 0;
+        synchronized (events) {
+            for (var e : events) {
+                if (parseExecutionId(e.executionId(), "").equals(wanted)) {
+                    var kind = new LinkedHashMap<String, Object>();
+                    kind.put("type", "external_event_received");
+                    kind.put("correlation_key", e.correlationKey());
+                    kind.put("payload", e.payload());
+                    out.add(new ExecutionEvent(UUID.randomUUID().toString(), wanted.toString(), ++seq, kind,
+                            Instant.now()));
+                }
+            }
+        }
+        return out;
     }
 
     @Override
@@ -76,10 +169,21 @@ class StubRuntimeClient extends JamjetRuntimeClient {
         return List.copyOf(events);
     }
 
-    int getWorkflowCount() { return workflowCounter; }
-    int getExecutionCount() { return executionCounter; }
+    int getWorkflowCalls() {
+        return workflowCalls;
+    }
 
-    record RecordedEvent(String executionId, String correlationKey, Map<String, Object> payload) {}
+    int getExecutionCount() {
+        return executions.size();
+    }
+
+    List<ExecutionState> executions() {
+        return List.copyOf(executions);
+    }
+
+    Map<String, Object> registeredIr(String workflowId) {
+        return workflows.get(workflowId + "@1.0.0");
+    }
 
     private static JamjetProperties defaultProps() {
         var props = new JamjetProperties();

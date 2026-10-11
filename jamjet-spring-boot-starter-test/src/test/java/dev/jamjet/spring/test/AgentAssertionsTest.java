@@ -1,6 +1,5 @@
 package dev.jamjet.spring.test;
 
-import dev.jamjet.spring.client.model.ExecutionEvent;
 import dev.jamjet.spring.client.model.ExecutionState;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -23,29 +22,29 @@ class AgentAssertionsTest {
     void setUp() {
         var now = Instant.now();
         var completedState = new ExecutionState(
-                "exec-ok", "wf-1", "Completed", null, Map.of("output", "quarterly revenue was $1.2B"),
-                now.minus(Duration.ofSeconds(5)), now, now, null
+                "exec-ok", "wf-1", "1.0.0", "completed", Map.of("output", "quarterly revenue was $1.2B"), Map.of("output", "quarterly revenue was $1.2B"),
+                now.minus(Duration.ofSeconds(5)), now, now
         );
         var completedEvents = List.of(
-                new ExecutionEvent("e1", "exec-ok", "NodeStarted", "chat",
-                        Map.of("kind", "LlmGenerate"), now.minus(Duration.ofSeconds(5))),
-                new ExecutionEvent("e2", "exec-ok", "ToolCallStarted", "chat",
-                        Map.of("tool_name", "WebSearch"), now.minus(Duration.ofSeconds(4))),
-                new ExecutionEvent("e3", "exec-ok", "ToolCallStarted", "chat",
-                        Map.of("tool_name", "WebSearch"), now.minus(Duration.ofSeconds(3))),
-                new ExecutionEvent("e4", "exec-ok", "NodeCompleted", "chat",
+                TestEvents.event("e1", "exec-ok", "node_scheduled", "chat",
+                        Map.of("queue_type", "model"), now.minus(Duration.ofSeconds(5))),
+                TestEvents.event("e2", "exec-ok", "tool_called", "chat",
+                        Map.of("tool", "WebSearch"), now.minus(Duration.ofSeconds(4))),
+                TestEvents.event("e3", "exec-ok", "tool_called", "chat",
+                        Map.of("tool", "WebSearch"), now.minus(Duration.ofSeconds(3))),
+                TestEvents.event("e4", "exec-ok", "node_completed", "chat",
                         Map.of("output", "quarterly revenue was $1.2B", "cost_usd", 0.03), now)
         );
         completedExecution = RecordedExecution.fromStateAndEvents(completedState, completedEvents);
 
         var failedState = new ExecutionState(
-                "exec-fail", "wf-1", "Failed", null, Map.of(),
-                now.minus(Duration.ofSeconds(2)), now, null, "timeout"
+                "exec-fail", "wf-1", "1.0.0", "failed", Map.of(), Map.of(),
+                now.minus(Duration.ofSeconds(2)), now, null
         );
         var failedEvents = List.of(
-                new ExecutionEvent("e1", "exec-fail", "NodeStarted", "chat",
-                        Map.of("kind", "LlmGenerate"), now.minus(Duration.ofSeconds(2))),
-                new ExecutionEvent("e2", "exec-fail", "NodeFailed", "chat",
+                TestEvents.event("e1", "exec-fail", "node_scheduled", "chat",
+                        Map.of("queue_type", "model"), now.minus(Duration.ofSeconds(2))),
+                TestEvents.event("e2", "exec-fail", "node_failed", "chat",
                         Map.of("error", "timeout"), now)
         );
         failedExecution = RecordedExecution.fromStateAndEvents(failedState, failedEvents);
@@ -60,7 +59,7 @@ class AgentAssertionsTest {
     void completedSuccessfullyFailsOnFailedExecution() {
         assertThatThrownBy(() -> AgentAssertions.assertThat(failedExecution).completedSuccessfully())
                 .isInstanceOf(AssertionError.class)
-                .hasMessageContaining("Failed");
+                .hasMessageContaining("failed");
     }
 
     @Test

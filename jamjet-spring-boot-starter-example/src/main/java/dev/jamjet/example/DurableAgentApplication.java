@@ -15,7 +15,7 @@ import org.springframework.context.annotation.Bean;
  *
  * <pre>{@code
  * # Start JamJet runtime
- * docker run -p 7700:7700 ghcr.io/jamjet-labs/jamjet:latest
+ * docker run -p 7700:8080 -e JAMJET_DEV_MODE=1 jamjetdev/jamjet:0.5.0
  *
  * # Run this application
  * OPENAI_API_KEY=sk-... mvn spring-boot:run -pl jamjet-spring-boot-starter-example

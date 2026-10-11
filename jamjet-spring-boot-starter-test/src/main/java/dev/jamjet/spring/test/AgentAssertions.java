@@ -40,10 +40,9 @@ public final class AgentAssertions {
                         "Expected execution to have failed but status was: " + execution.status());
             }
             boolean found = execution.events().stream()
-                    .filter(e -> "NodeFailed".equals(e.eventType()))
+                    .filter(e -> "node_failed".equals(e.type()))
                     .anyMatch(e -> {
-                        if (e.payload() == null) return false;
-                        Object error = e.payload().get("error");
+                        Object error = e.field("error");
                         return error != null && error.toString().contains(errorContaining);
                     });
             if (!found) {
@@ -81,8 +80,8 @@ public final class AgentAssertions {
 
         public AgentAssert usedTool(String toolName) {
             boolean found = execution.events().stream()
-                    .filter(e -> "ToolCallStarted".equals(e.eventType()) || "ToolCall".equals(e.eventType()))
-                    .anyMatch(e -> e.payload() != null && toolName.equals(e.payload().get("tool_name")));
+                    .filter(RecordedExecution::isToolCall)
+                    .anyMatch(e -> toolName.equals(toolNameOf(e)));
             if (!found) {
                 throw new AssertionError(
                         "Expected tool '" + toolName + "' to be used but it was not found in execution events");
@@ -92,8 +91,8 @@ public final class AgentAssertions {
 
         public AgentAssert usedToolTimes(String toolName, int expectedTimes) {
             long actual = execution.events().stream()
-                    .filter(e -> "ToolCallStarted".equals(e.eventType()) || "ToolCall".equals(e.eventType()))
-                    .filter(e -> e.payload() != null && toolName.equals(e.payload().get("tool_name")))
+                    .filter(RecordedExecution::isToolCall)
+                    .filter(e -> toolName.equals(toolNameOf(e)))
                     .count();
             if (actual != expectedTimes) {
                 throw new AssertionError(
@@ -105,8 +104,8 @@ public final class AgentAssertions {
 
         public AgentAssert didNotUseTool(String toolName) {
             boolean found = execution.events().stream()
-                    .filter(e -> "ToolCallStarted".equals(e.eventType()) || "ToolCall".equals(e.eventType()))
-                    .anyMatch(e -> e.payload() != null && toolName.equals(e.payload().get("tool_name")));
+                    .filter(RecordedExecution::isToolCall)
+                    .anyMatch(e -> toolName.equals(toolNameOf(e)));
             if (found) {
                 throw new AssertionError(
                         "Expected tool '" + toolName + "' to NOT be used but it was found in execution events");
@@ -170,9 +169,15 @@ public final class AgentAssertions {
             return this;
         }
 
+        /**
+         * Asserts an event of this kind exists. Takes the runtime's snake_case
+         * tag ({@code node_failed}); a PascalCase name ({@code NodeFailed}) is
+         * converted.
+         */
         public AgentAssert hasEvent(String eventType) {
+            String wanted = toSnakeCase(eventType);
             boolean found = execution.events().stream()
-                    .anyMatch(e -> eventType.equals(e.eventType()));
+                    .anyMatch(e -> wanted.equals(e.type()));
             if (!found) {
                 throw new AssertionError(
                         "Expected event type '" + eventType + "' but it was not found");
@@ -201,12 +206,24 @@ public final class AgentAssertions {
             }
             for (int i = execution.events().size() - 1; i >= 0; i--) {
                 var event = execution.events().get(i);
-                if ("NodeCompleted".equals(event.eventType()) && event.payload() != null) {
-                    Object output = event.payload().get("output");
+                if ("node_completed".equals(event.type())) {
+                    Object output = event.field("output");
                     if (output != null) return output.toString();
                 }
             }
             return "";
+        }
+
+        private static Object toolNameOf(dev.jamjet.spring.client.model.ExecutionEvent e) {
+            Object tool = e.field("tool");
+            return tool != null ? tool : e.field("tool_name");
+        }
+
+        static String toSnakeCase(String name) {
+            if (name == null || name.isEmpty() || name.contains("_") || name.equals(name.toLowerCase())) {
+                return name;
+            }
+            return name.replaceAll("([a-z0-9])([A-Z])", "$1_$2").toLowerCase();
         }
 
         private static String truncate(String s) {

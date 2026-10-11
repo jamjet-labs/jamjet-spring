@@ -10,7 +10,7 @@ class JamjetConfigTest {
     void defaultConfigValues() {
         var config = new JamjetConfig();
         assertThat(config.getRuntimeUrl()).isEqualTo("http://localhost:7700");
-        assertThat(config.getTenantId()).isEqualTo("default");
+        assertThat(config.getTenantId()).isNull();
         assertThat(config.getApiToken()).isNull();
         assertThat(config.getConnectTimeoutSeconds()).isEqualTo(10);
         assertThat(config.getReadTimeoutSeconds()).isEqualTo(120);

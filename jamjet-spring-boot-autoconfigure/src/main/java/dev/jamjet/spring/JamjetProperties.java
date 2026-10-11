@@ -8,8 +8,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * <pre>{@code
  * spring.jamjet.runtime-url=http://localhost:7700
  * spring.jamjet.api-token=${JAMJET_API_TOKEN}
- * spring.jamjet.tenant-id=default
  * spring.jamjet.durability-enabled=true
+ * spring.jamjet.on-runtime-error=fail-closed
  * }</pre>
  */
 @ConfigurationProperties(prefix = "spring.jamjet")
@@ -21,11 +21,37 @@ public class JamjetProperties {
     /** API token for authentication. */
     private String apiToken;
 
-    /** Tenant ID for multi-tenant isolation. */
-    private String tenantId = "default";
+    /**
+     * Ignored. The runtime takes the tenant from the API token ({@code default}
+     * in dev mode) and never read the {@code X-Tenant-Id} header this used to send.
+     *
+     * @deprecated the API token decides the tenant; setting this logs a warning
+     */
+    @Deprecated
+    private String tenantId;
 
     /** Enable/disable durable execution. */
     private boolean durabilityEnabled = true;
+
+    /**
+     * What the advisors do when the runtime cannot record a call:
+     * {@code fail-closed} (default) refuses the call, {@code fail-open} logs a
+     * warning and lets it run unrecorded.
+     */
+    private RuntimeErrorMode onRuntimeError = RuntimeErrorMode.FAIL_CLOSED;
+
+    /**
+     * Workflow id the durability advisor registers on the runtime. Every
+     * advised call starts one execution of this workflow.
+     */
+    private String workflowId = "spring-ai-chat";
+
+    /**
+     * Allow streaming ChatClient calls in fail-closed mode. Off by default: a
+     * stream's record can only be written after its output was delivered, so a
+     * record failure on a stream is reported after the fact.
+     */
+    private boolean allowStreaming = false;
 
     /** Connection timeout in seconds. */
     private int connectTimeoutSeconds = 10;
@@ -58,10 +84,14 @@ public class JamjetProperties {
         this.apiToken = apiToken;
     }
 
+    /** @deprecated ignored; the API token decides the tenant. */
+    @Deprecated
     public String getTenantId() {
         return tenantId;
     }
 
+    /** @deprecated ignored; the API token decides the tenant. */
+    @Deprecated
     public void setTenantId(String tenantId) {
         this.tenantId = tenantId;
     }
@@ -72,6 +102,34 @@ public class JamjetProperties {
 
     public void setDurabilityEnabled(boolean durabilityEnabled) {
         this.durabilityEnabled = durabilityEnabled;
+    }
+
+    public RuntimeErrorMode getOnRuntimeError() {
+        return onRuntimeError;
+    }
+
+    public void setOnRuntimeError(RuntimeErrorMode onRuntimeError) {
+        this.onRuntimeError = onRuntimeError == null ? RuntimeErrorMode.FAIL_CLOSED : onRuntimeError;
+    }
+
+    public boolean isFailOpen() {
+        return onRuntimeError == RuntimeErrorMode.FAIL_OPEN;
+    }
+
+    public String getWorkflowId() {
+        return workflowId;
+    }
+
+    public void setWorkflowId(String workflowId) {
+        this.workflowId = workflowId;
+    }
+
+    public boolean isAllowStreaming() {
+        return allowStreaming;
+    }
+
+    public void setAllowStreaming(boolean allowStreaming) {
+        this.allowStreaming = allowStreaming;
     }
 
     public int getConnectTimeoutSeconds() {
@@ -167,8 +225,62 @@ public class JamjetProperties {
         /** Max time to wait for an approval before timing out. */
         private String timeout = "30m";
 
-        /** What happens on timeout: "approved" or "rejected". */
+        /**
+         * Deprecated: a call that times out is always rejected. Only "rejected" is
+         * accepted; any other value fails at startup.
+         */
+        @Deprecated
         private String defaultDecision = "rejected";
+
+        /**
+         * Authority a reviewer must hold to list or decide approvals. Blank turns
+         * the check off (only if the application authorizes /jamjet/approvals itself).
+         */
+        private String requiredAuthority = "ROLE_JAMJET_APPROVER";
+
+        public String getRequiredAuthority() {
+            return requiredAuthority;
+        }
+
+        public void setRequiredAuthority(String requiredAuthority) {
+            this.requiredAuthority = requiredAuthority;
+        }
+
+        /**
+         * Allow approving a call whose initiator could not be determined (no
+         * SecurityContext at call time), so separation of duties cannot be checked.
+         */
+        private boolean allowUnknownInitiator = false;
+
+        public boolean isAllowUnknownInitiator() {
+            return allowUnknownInitiator;
+        }
+
+        public void setAllowUnknownInitiator(boolean allowUnknownInitiator) {
+            this.allowUnknownInitiator = allowUnknownInitiator;
+        }
+
+        /** Accept a remember-me login as a reviewer. Off: a reviewer must have signed in this session. */
+        private boolean allowRememberMe = false;
+
+        public boolean isAllowRememberMe() {
+            return allowRememberMe;
+        }
+
+        public void setAllowRememberMe(boolean allowRememberMe) {
+            this.allowRememberMe = allowRememberMe;
+        }
+
+        /** The approval REST endpoints ({@code spring.jamjet.approval.controller.*}). */
+        private Controller controller = new Controller();
+
+        public Controller getController() {
+            return controller;
+        }
+
+        public void setController(Controller controller) {
+            this.controller = controller;
+        }
 
         public boolean isEnabled() {
             return enabled;
@@ -194,12 +306,37 @@ public class JamjetProperties {
             this.timeout = timeout;
         }
 
+        /** @deprecated a timed-out call is always rejected. */
+        @Deprecated
         public String getDefaultDecision() {
             return defaultDecision;
         }
 
+        /** @deprecated a timed-out call is always rejected; only "rejected" is accepted. */
+        @Deprecated
         public void setDefaultDecision(String defaultDecision) {
             this.defaultDecision = defaultDecision;
+        }
+    }
+
+    /**
+     * Approval endpoint configuration ({@code spring.jamjet.approval.controller.*}).
+     */
+    public static class Controller {
+
+        /**
+         * Register the approval endpoints without Spring Security, accepting
+         * unauthenticated decisions. Local development only: anyone who can reach
+         * the application can then approve its calls.
+         */
+        private boolean allowUnauthenticated = false;
+
+        public boolean isAllowUnauthenticated() {
+            return allowUnauthenticated;
+        }
+
+        public void setAllowUnauthenticated(boolean allowUnauthenticated) {
+            this.allowUnauthenticated = allowUnauthenticated;
         }
     }
 

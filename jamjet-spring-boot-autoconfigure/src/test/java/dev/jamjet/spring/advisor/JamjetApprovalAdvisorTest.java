@@ -33,4 +33,23 @@ class JamjetApprovalAdvisorTest {
         assertThat(JamjetApprovalAdvisor.parseTimeout(null)).isEqualTo(Duration.ofMinutes(30));
         assertThat(JamjetApprovalAdvisor.parseTimeout("")).isEqualTo(Duration.ofMinutes(30));
     }
+
+    @Test
+    void parseTimeoutAcceptsSpringDurationFormats() {
+        assertThat(JamjetApprovalAdvisor.parseTimeout("500ms")).isEqualTo(Duration.ofMillis(500));
+        assertThat(JamjetApprovalAdvisor.parseTimeout("30s")).isEqualTo(Duration.ofSeconds(30));
+        assertThat(JamjetApprovalAdvisor.parseTimeout("PT2M")).isEqualTo(Duration.ofMinutes(2));
+        assertThat(JamjetApprovalAdvisor.parseTimeout("1d")).isEqualTo(Duration.ofDays(1));
+    }
+
+    @Test
+    void aBadTimeoutFailsAtStartupNotOnTheFirstCall() {
+        var props = new dev.jamjet.spring.JamjetProperties();
+        props.getApproval().setTimeout("soon");
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> new JamjetApprovalAdvisor(
+                        new dev.jamjet.spring.client.JamjetRuntimeClient(props), props,
+                        new dev.jamjet.spring.approval.ApprovalWaitRegistry()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("spring.jamjet.approval.timeout");
+    }
 }

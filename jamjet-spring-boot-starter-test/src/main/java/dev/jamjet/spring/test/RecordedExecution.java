@@ -7,7 +7,6 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 
 public record RecordedExecution(
         String executionId,
@@ -42,8 +41,8 @@ public record RecordedExecution(
                 state.executionId(),
                 state.workflowId(),
                 state.status(),
-                state.state() != null ? state.state().get("input") : null,
-                state.state(),
+                state.initialInput(),
+                state.currentState(),
                 List.copyOf(events),
                 List.copyOf(nodes),
                 duration,
@@ -74,7 +73,6 @@ public record RecordedExecution(
     private static List<NodeExecution> parseNodes(List<ExecutionEvent> events) {
         var nodeStarts = new java.util.LinkedHashMap<String, Instant>();
         var nodeKinds = new java.util.LinkedHashMap<String, String>();
-        var nodeInputs = new java.util.LinkedHashMap<String, Object>();
         var nodeOutputs = new java.util.LinkedHashMap<String, Object>();
         var nodeStatuses = new java.util.LinkedHashMap<String, String>();
         var nodeRetries = new java.util.LinkedHashMap<String, Integer>();
@@ -84,30 +82,32 @@ public record RecordedExecution(
             String nId = event.nodeId();
             if (nId == null || nId.isBlank()) continue;
 
-            Map<String, Object> payload = event.payload() != null ? event.payload() : Map.of();
-            String type = event.eventType();
+            String type = event.type();
+            if (type == null) continue;
 
             switch (type) {
-                case "NodeStarted" -> {
-                    nodeStarts.putIfAbsent(nId, event.timestamp());
-                    nodeKinds.putIfAbsent(nId, (String) payload.get("kind"));
-                    nodeInputs.putIfAbsent(nId, payload.get("input"));
+                case "node_scheduled" -> {
+                    Object queue = event.field("queue_type");
+                    if (queue != null) nodeKinds.putIfAbsent(nId, queue.toString());
+                }
+                case "node_started" -> {
+                    nodeStarts.putIfAbsent(nId, event.createdAt());
                     nodeStatuses.put(nId, "running");
                     nodeRetries.putIfAbsent(nId, 0);
                 }
-                case "NodeCompleted" -> {
-                    nodeEnds.put(nId, event.timestamp());
-                    nodeOutputs.put(nId, payload.get("output"));
+                case "node_completed" -> {
+                    nodeStarts.putIfAbsent(nId, event.createdAt());
+                    nodeEnds.put(nId, event.createdAt());
+                    nodeOutputs.put(nId, event.field("output"));
                     nodeStatuses.put(nId, "completed");
                 }
-                case "NodeFailed" -> {
-                    nodeEnds.put(nId, event.timestamp());
-                    nodeOutputs.put(nId, payload.get("error"));
+                case "node_failed" -> {
+                    nodeStarts.putIfAbsent(nId, event.createdAt());
+                    nodeEnds.put(nId, event.createdAt());
+                    nodeOutputs.put(nId, event.field("error"));
                     nodeStatuses.put(nId, "failed");
                 }
-                case "NodeRetried" -> {
-                    nodeRetries.merge(nId, 1, Integer::sum);
-                }
+                case "retry_scheduled" -> nodeRetries.merge(nId, 1, Integer::sum);
                 default -> { }
             }
         }
@@ -120,7 +120,7 @@ public record RecordedExecution(
                     nId,
                     nodeKinds.getOrDefault(nId, "unknown"),
                     nodeStatuses.getOrDefault(nId, "unknown"),
-                    nodeInputs.get(nId),
+                    null,
                     nodeOutputs.get(nId),
                     Duration.between(start, end),
                     nodeRetries.getOrDefault(nId, 0)
@@ -130,35 +130,39 @@ public record RecordedExecution(
     }
 
     private static int countToolCalls(List<ExecutionEvent> events) {
-        return (int) events.stream()
-                .filter(e -> "ToolCallStarted".equals(e.eventType()) || "ToolCall".equals(e.eventType()))
-                .count();
+        return (int) events.stream().filter(RecordedExecution::isToolCall).count();
     }
 
     @SuppressWarnings("unchecked")
     private static double extractCost(List<ExecutionEvent> events) {
         return events.stream()
-                .filter(e -> e.payload() != null && e.payload().containsKey("cost_usd"))
-                .mapToDouble(e -> ((Number) e.payload().get("cost_usd")).doubleValue())
+                .filter(e -> e.field("cost_usd") instanceof Number)
+                .mapToDouble(e -> ((Number) e.field("cost_usd")).doubleValue())
                 .sum();
     }
 
     private static Duration computeDuration(ExecutionState state, List<ExecutionEvent> events) {
-        if (state.createdAt() != null && state.completedAt() != null) {
-            return Duration.between(state.createdAt(), state.completedAt());
+        if (state.startedAt() != null && state.completedAt() != null) {
+            return Duration.between(state.startedAt(), state.completedAt());
         }
         return computeDurationFromEvents(events);
     }
 
     private static Duration computeDurationFromEvents(List<ExecutionEvent> events) {
         if (events.isEmpty()) return Duration.ZERO;
-        Instant first = events.getFirst().timestamp();
-        Instant last = events.getLast().timestamp();
+        Instant first = events.getFirst().createdAt();
+        Instant last = events.getLast().createdAt();
         return (first != null && last != null) ? Duration.between(first, last) : Duration.ZERO;
     }
 
     private static boolean isCompletionEvent(ExecutionEvent event) {
-        String type = event.eventType();
-        return "NodeCompleted".equals(type) || "NodeFailed".equals(type);
+        String type = event.type();
+        return "node_completed".equals(type) || "node_failed".equals(type);
+    }
+
+    /** A tool invocation: {@code tool_called} (strategy loops) or {@code agent_tool_invoked}. */
+    static boolean isToolCall(ExecutionEvent event) {
+        String type = event.type();
+        return "tool_called".equals(type) || "agent_tool_invoked".equals(type);
     }
 }

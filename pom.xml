@@ -6,7 +6,7 @@
 
     <groupId>dev.jamjet</groupId>
     <artifactId>jamjet-spring-boot-parent</artifactId>
-    <version>0.2.0</version>
+    <version>0.2.1</version>
     <packaging>pom</packaging>
 
     <name>JamJet Spring Boot Parent</name>
@@ -167,6 +167,33 @@
                         <id>sign-artifacts</id>
                         <phase>verify</phase>
                         <goals><goal>sign</goal></goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <!--
+              Refuse to publish a version Maven Central already has for any
+              module (scripts/check_release_version.py). Runs in this parent
+              module's deploy phase, which comes before any module is built
+              and before the bundle is uploaded. CI runs the same script.
+            -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>3.6.4</version>
+                <inherited>false</inherited>
+                <executions>
+                    <execution>
+                        <id>check-release-version</id>
+                        <phase>deploy</phase>
+                        <goals><goal>exec</goal></goals>
+                        <configuration>
+                            <executable>python3</executable>
+                            <arguments>
+                                <argument>${project.basedir}/scripts/check_release_version.py</argument>
+                                <argument>--root</argument>
+                                <argument>${project.basedir}</argument>
+                            </arguments>
+                        </configuration>
                     </execution>
                 </executions>
             </plugin>

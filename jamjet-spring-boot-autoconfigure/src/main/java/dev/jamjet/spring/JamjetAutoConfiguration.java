@@ -11,7 +11,7 @@ import dev.jamjet.spring.client.JamjetRuntimeClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
-import org.springframework.ai.chat.client.ChatClientCustomizer;
+import org.springframework.ai.chat.client.ChatClientBuilderCustomizer;
 import org.springframework.ai.chat.client.advisor.api.Advisor;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -36,7 +36,7 @@ import java.util.List;
  * <ul>
  *   <li>{@link JamjetRuntimeClient} — always (when durability enabled)</li>
  *   <li>{@link JamjetDurabilityAdvisor} — always (core durability)</li>
- *   <li>a {@link ChatClientCustomizer} adding the enabled advisors to every auto-configured ChatClient</li>
+ *   <li>a {@link ChatClientBuilderCustomizer} adding the enabled advisors to every auto-configured ChatClient</li>
  *   <li>{@link JamjetAuditAdvisor} + {@link JamjetAuditService} — when {@code spring.jamjet.audit.enabled=true} (default)</li>
  *   <li>{@link JamjetApprovalAdvisor} + {@link JamjetApprovalController} — when {@code spring.jamjet.approval.enabled=true} (opt-in)</li>
  * </ul>
@@ -74,7 +74,7 @@ public class JamjetAutoConfiguration {
      * orders itself (durability, then audit, then approval).
      */
     @Bean
-    public ChatClientCustomizer jamjetChatClientCustomizer(
+    public ChatClientBuilderCustomizer jamjetChatClientCustomizer(
             JamjetDurabilityAdvisor durabilityAdvisor,
             ObjectProvider<JamjetAuditAdvisor> auditAdvisor,
             ObjectProvider<JamjetApprovalAdvisor> approvalAdvisor) {

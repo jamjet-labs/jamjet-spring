@@ -19,7 +19,6 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.TreeSet;
 
@@ -29,9 +28,16 @@ import java.util.TreeSet;
  *
  * <p>Covered: every message's role and text, its media (MIME type and a SHA-256
  * of the bytes, or the URL), an assistant message's tool calls, a tool message's
- * responses, and the options (model, sampling settings, tool names and tool
- * definitions). Not covered: the tool calls Spring AI makes inside the model call
- * after approval; those are not individually reviewed here.
+ * responses, and the options (model, sampling settings, provider options, the tool
+ * definitions with their return-direct flag, and the tool context). Not covered:
+ * the tool calls Spring AI's tool-calling advisor runs after the model answered;
+ * those are not individually reviewed here.
+ *
+ * <p>Spring AI 2.0 removed the per-request tool names and the internal tool
+ * execution flag from {@link ToolCallingChatOptions}: the ChatClient resolves every
+ * tool to a callback before the advisors run, and a {@code ToolCallingAdvisor} in
+ * the advisor chain, not the model, runs the tool calls. The offered tools are
+ * therefore exactly the callbacks digested here.
  */
 public final class ApprovalContent {
 
@@ -51,6 +57,35 @@ public final class ApprovalContent {
             byte[] json = CANONICAL.writeValueAsBytes(canonical(prompt));
             return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(json));
         } catch (JsonProcessingException | NoSuchAlgorithmException e) {
+            throw new IllegalStateException("could not digest the prompt", e);
+        }
+    }
+
+    /** SHA-256 (hex) of each message's canonical form, in order. */
+    public static java.util.List<String> messageDigests(Prompt prompt) {
+        var out = new ArrayList<String>();
+        if (prompt != null) {
+            for (Message m : prompt.getInstructions()) {
+                out.add(messageDigest(m));
+            }
+        }
+        return out;
+    }
+
+    /** SHA-256 (hex) of one message's canonical form: role, text, media, tool calls, tool responses. */
+    public static String messageDigest(Message message) {
+        return sha256Of(message(message));
+    }
+
+    /** SHA-256 (hex) of the canonical options: every property, the tool definitions and the tool context. */
+    public static String optionsDigest(Prompt prompt) {
+        return sha256Of(prompt == null ? Map.of() : options(prompt.getOptions()));
+    }
+
+    private static String sha256Of(Object canonical) {
+        try {
+            return sha256(CANONICAL.writeValueAsBytes(canonical));
+        } catch (JsonProcessingException e) {
             throw new IllegalStateException("could not digest the prompt", e);
         }
     }
@@ -120,7 +155,7 @@ public final class ApprovalContent {
 
     /** Names handled explicitly below, or that cannot be serialized (tool callbacks hold code). */
     private static final java.util.Set<String> SPECIAL_PROPERTIES = java.util.Set.of(
-            "class", "toolCallbacks", "toolNames", "toolContext", "internalToolExecutionEnabled");
+            "class", "toolCallbacks", "toolContext");
 
     /**
      * Every readable property of the concrete options object (so provider-specific
@@ -146,7 +181,6 @@ public final class ApprovalContent {
         }
         out.put("properties", properties);
         if (options instanceof ToolCallingChatOptions tools) {
-            out.put("tool_names", tools.getToolNames() == null ? List.of() : new TreeSet<>(tools.getToolNames()));
             var definitions = new ArrayList<Map<String, Object>>();
             if (tools.getToolCallbacks() != null) {
                 for (ToolCallback cb : tools.getToolCallbacks()) {
@@ -154,12 +188,13 @@ public final class ApprovalContent {
                     d.put("name", cb.getToolDefinition().name());
                     d.put("description", cb.getToolDefinition().description());
                     d.put("input_schema", cb.getToolDefinition().inputSchema());
+                    // A return-direct tool's result goes to the caller instead of the model.
+                    d.put("return_direct", cb.getToolMetadata() != null && cb.getToolMetadata().returnDirect());
                     definitions.add(d);
                 }
             }
             definitions.sort(Comparator.comparing(d -> String.valueOf(d.get("name"))));
             out.put("tool_definitions", definitions);
-            out.put("internal_tool_execution", tools.getInternalToolExecutionEnabled());
             var context = new java.util.TreeMap<String, Object>();
             if (tools.getToolContext() != null) {
                 tools.getToolContext().forEach((k, v) -> context.put(k, plain(v)));
@@ -215,9 +250,6 @@ public final class ApprovalContent {
             }
             if (prompt.getOptions() instanceof ToolCallingChatOptions tools) {
                 var names = new TreeSet<String>();
-                if (tools.getToolNames() != null) {
-                    names.addAll(tools.getToolNames());
-                }
                 if (tools.getToolCallbacks() != null) {
                     tools.getToolCallbacks().forEach(cb -> names.add(cb.getToolDefinition().name()));
                 }

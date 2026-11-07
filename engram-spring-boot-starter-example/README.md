@@ -92,7 +92,7 @@ Spring Boot auto-configures:
 |------|--------------|
 | `EngramClient` | HTTP client for the Engram REST API |
 | `EngramContextAdvisor` | Spring AI advisor that injects memory into prompts |
-| `ChatClientCustomizer` | Wires the advisor into every ChatClient |
+| `ChatClientBuilderCustomizer` | Wires the advisor into every ChatClient |
 | `EngramHealthIndicator` | Spring Boot Actuator health (if Actuator is on the classpath) |
 
 You can disable any of them via `application.yml`:

@@ -52,4 +52,26 @@ class JamjetApprovalAdvisorTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("spring.jamjet.approval.timeout");
     }
+
+    @Test
+    void aCallFromAChainThatDoesNotHoldTheAdvisorIsRefused() {
+        var props = new dev.jamjet.spring.JamjetProperties();
+        var advisor = new JamjetApprovalAdvisor(new dev.jamjet.spring.client.JamjetRuntimeClient(props), props,
+                new dev.jamjet.spring.approval.ApprovalWaitRegistry());
+        var model = StubChatModel.answering("hello");
+        var chain = org.springframework.ai.chat.client.advisor.DefaultAroundAdvisorChain
+                .builder(io.micrometer.observation.ObservationRegistry.NOOP)
+                .push(org.springframework.ai.chat.client.advisor.ChatModelCallAdvisor.builder().chatModel(model).build())
+                .build();
+        var request = org.springframework.ai.chat.client.ChatClientRequest.builder()
+                .prompt(new org.springframework.ai.chat.prompt.Prompt("wire 100"))
+                .context(java.util.Map.of(JamjetApprovalAdvisor.REQUIRES_APPROVAL_KEY, true,
+                        JamjetDurabilityAdvisor.EXECUTION_ID_KEY, "exec_1"))
+                .build();
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> advisor.adviseCall(request, chain))
+                .isInstanceOf(ApprovalRejectedException.class)
+                .hasMessageContaining("not in the advisor chain");
+        assertThat(model.calls).hasValue(0);
+    }
 }

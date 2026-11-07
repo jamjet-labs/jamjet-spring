@@ -19,9 +19,10 @@ import java.util.function.Function;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Spring AI 1.0's ChatModelCallAdvisor appends the output-format instructions
- * to the user message after every advisor. The approved digest and preview
- * must include them. Ported from the round-3 probe P2.
+ * Spring AI's ChatModelCallAdvisor changes the request after every advisor: it
+ * appends the output-format instructions to the user message, or, for native
+ * structured output, puts the JSON schema in the options. The approved digest and
+ * preview must include what it adds. Ported from the round-3 probe P2.
  */
 class ApprovedContentIsWhatTheModelGetsTest {
 
@@ -77,6 +78,22 @@ class ApprovedContentIsWhatTheModelGetsTest {
         assertThat(model.lastPrompt.getContents()).as("Spring AI appended the format").contains("JSON");
         assertThat(ApprovalContent.digest(model.lastPrompt)).isEqualTo(reviewedDigest);
         assertThat(reviewedPreview).contains("JSON");
+    }
+
+    @Test
+    void aNativeStructuredOutputCallApprovesTheSchemaTheModelGets() throws Exception {
+        model.withOptions(org.springframework.ai.model.tool.StructuredOutputChatOptions.builder().model("m").build());
+
+        Result result = approveAndRun(spec -> spec
+                .advisors(org.springframework.ai.chat.client.AdvisorParams.ENABLE_NATIVE_STRUCTURED_OUTPUT)
+                .call().entity(Result.class));
+
+        assertThat(result.status()).isEqualTo("sent");
+        assertThat(model.lastPrompt.getOptions())
+                .isInstanceOfSatisfying(org.springframework.ai.model.tool.StructuredOutputChatOptions.class,
+                        o -> assertThat(o.getOutputSchema()).as("Spring AI put the schema in the options")
+                                .contains("status"));
+        assertThat(ApprovalContent.digest(model.lastPrompt)).isEqualTo(reviewedDigest);
     }
 
     @Test

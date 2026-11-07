@@ -4,7 +4,7 @@ import dev.jamjet.spring.advisor.JamjetApprovalAdvisor;
 import dev.jamjet.spring.advisor.StubChatModel;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.client.ChatClient;
-import org.springframework.ai.chat.client.ChatClientCustomizer;
+import org.springframework.ai.chat.client.ChatClientBuilderCustomizer;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.context.annotation.ImportCandidates;
@@ -35,7 +35,7 @@ class JamjetApprovalGateTest {
 
     private static ChatClient customized(ApplicationContext context, StubChatModel model) {
         var builder = ChatClient.builder(model);
-        context.getBeansOfType(ChatClientCustomizer.class).values().forEach(c -> c.customize(builder));
+        context.getBeansOfType(ChatClientBuilderCustomizer.class).values().forEach(c -> c.customize(builder));
         return builder.build();
     }
 

@@ -9,6 +9,9 @@ import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
+import org.springframework.core.env.MapPropertySource;
+
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -95,6 +98,45 @@ class EngramTokenTest {
                 assertThat(first.authorization()).isEqualTo("Bearer s3cret");
             });
         });
+    }
+
+    /** {@code withPropertyValues} trims values, so raw ones go in as a property source. */
+    private ApplicationContextRunner withRawEnvironment(String name, String value) {
+        return runner.withInitializer(context -> context.getEnvironment().getPropertySources()
+                .addFirst(new MapPropertySource("raw", Map.of(name, value))));
+    }
+
+    @Test
+    void aTokenReadFromAFileWithATrailingNewlineIsTrimmed() {
+        assertThat(authorizationSentBy(withRawEnvironment("ENGRAM_AUTH_TOKEN", "tok-SECRET-123\n")))
+                .isEqualTo("Bearer tok-SECRET-123");
+    }
+
+    @Test
+    void aTokenWithAControlCharacterFailsWithoutPrintingIt(CapturedOutput output) {
+        withRawEnvironment("ENGRAM_AUTH_TOKEN", "tok-SECRET\r\nX-Injected: 1").run(context -> {
+            assertThat(context).hasFailed();
+            assertThat(context.getStartupFailure()).rootCause()
+                    .hasMessageContaining("ENGRAM_AUTH_TOKEN")
+                    .hasMessageNotContaining("tok-SECRET");
+        });
+        assertThat(output).doesNotContain("tok-SECRET");
+    }
+
+    @Test
+    void warnsWhenTheTokenGoesOverPlainHttpToAnotherHost(CapturedOutput output) {
+        new ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(EngramAutoConfiguration.class))
+                .withPropertyValues("engram.base-url=http://engram.example.invalid:9090",
+                        "engram.verify-on-startup=false", "ENGRAM_AUTH_TOKEN=s3cret")
+                .run(context -> assertThat(context).hasNotFailed());
+        assertThat(output).contains("plain HTTP").doesNotContain("s3cret");
+    }
+
+    @Test
+    void noPlainHttpWarningForLoopback(CapturedOutput output) {
+        runner.withPropertyValues("ENGRAM_AUTH_TOKEN=s3cret").run(context -> assertThat(context).hasNotFailed());
+        assertThat(output).doesNotContain("plain HTTP");
     }
 
     @Test

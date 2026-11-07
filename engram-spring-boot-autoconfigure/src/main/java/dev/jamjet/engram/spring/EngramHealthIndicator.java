@@ -22,6 +22,7 @@ public class EngramHealthIndicator implements HealthIndicator {
 
     @Override
     public Health health() {
+        boolean interruptedBefore = Thread.currentThread().isInterrupted();
         try {
             Map<String, Object> result = client.health();
             String status = String.valueOf(result.getOrDefault("status", "unknown"));
@@ -35,6 +36,7 @@ public class EngramHealthIndicator implements HealthIndicator {
                     .withDetail("response", result)
                     .build();
         } catch (Exception e) {
+            EngramSdkInterrupts.undo(e, interruptedBefore);
             return Health.down()
                     .withDetail("error", e.getMessage())
                     .withDetail("exception", e.getClass().getSimpleName())

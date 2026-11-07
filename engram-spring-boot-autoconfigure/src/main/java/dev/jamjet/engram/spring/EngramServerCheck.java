@@ -17,10 +17,11 @@ import java.time.Duration;
  *
  * <p>It sends {@code GET /health} once and expects
  * {@code {"status":"ok","service":"engram"}}. A server that answers something
- * else (the Python Engram server, another service, a 401) fails startup with
- * an {@link EngramServerMismatchException} that says what was found. A server
- * that cannot be reached or answers 5xx only logs a warning, so an Engram
- * outage never stops the application from starting.
+ * else (the Python Engram server, another service, a redirect, a 401) fails
+ * startup with an {@link EngramServerMismatchException} that says what was
+ * found. A server that cannot be reached, answers 5xx or rate-limits (429)
+ * only logs a warning, so an Engram outage never stops the application from
+ * starting.
  *
  * <p>Turn it off with {@code engram.verify-on-startup=false}.
  */
@@ -65,15 +66,23 @@ final class EngramServerCheck {
             throw mismatch("GET /health answered HTTP 200 with " + describe(health)
                     + ", which is not an Engram server.");
         }
-        if (status == 401 || status == 403) {
+        if (status == 401 || status == 403 || status == 407) {
             throw mismatch("GET /health answered HTTP " + status + ": the server refused "
                     + (token == null ? "a request without a token" : "the configured token")
-                    + ". Set ENGRAM_AUTH_TOKEN (or engram.api-token) to the token the server was started with.");
+                    + ". Set ENGRAM_AUTH_TOKEN (or engram.api-token) to the token the server, "
+                    + "or the proxy in front of it, expects.");
         }
         if (status == 404 || status == 405) {
             throw mismatch("GET /health answered HTTP " + status + "." + whatAnswersHealthz());
         }
-        warnUnchecked("GET /health answered HTTP " + status);
+        if (status >= 500 || status == 429) {
+            // An outage or rate limit says nothing about which server this is.
+            warnUnchecked("GET /health answered HTTP " + status);
+            return;
+        }
+        // Redirects, other 4xx and other 2xx: the Rust server answers 200 here.
+        throw mismatch("GET /health answered HTTP " + status + " with " + describe(health)
+                + ", which is not an Engram server.");
     }
 
     private String whatAnswersHealthz() {

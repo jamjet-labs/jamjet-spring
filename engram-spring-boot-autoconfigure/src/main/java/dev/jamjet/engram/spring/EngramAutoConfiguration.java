@@ -85,9 +85,26 @@ public class EngramAutoConfiguration {
                 .apiToken(token)
                 .timeoutSeconds(properties.getTimeoutSeconds())
                 .build();
+        if (config.apiToken() != null && sendsInTheClear(config.baseUrl())) {
+            log.warn("Engram: sending the Engram token over plain HTTP to {}. Use https unless the "
+                    + "network between this application and Engram is private.", config.baseUrl());
+        }
         if (properties.isVerifyOnStartup()) {
             new EngramServerCheck(config.baseUrl(), config.apiToken(), properties.getTimeoutSeconds()).verify();
         }
         return new EngramClient(config);
+    }
+
+    private static boolean sendsInTheClear(String baseUrl) {
+        try {
+            java.net.URI uri = java.net.URI.create(baseUrl);
+            if (!"http".equalsIgnoreCase(uri.getScheme()) || uri.getHost() == null) {
+                return false;
+            }
+            String host = uri.getHost();
+            return !(host.equalsIgnoreCase("localhost") || host.startsWith("127.") || host.equals("[::1]"));
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
     }
 }

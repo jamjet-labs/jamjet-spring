@@ -95,7 +95,7 @@ Spring Boot auto-configures:
 | `EngramContextAdvisor` | Spring AI advisor that injects memory into prompts |
 | `ChatClientCustomizer` | Wires the advisor into every ChatClient |
 | `EngramHealthIndicator` | Spring Boot Actuator health (if Actuator is on the classpath) |
-| `EngramChatMemoryRepository` | Spring AI `ChatMemoryRepository` backed by Engram. `jamjet-engram-server` 0.5.0 does not serve the routes it reads with, so reads throw `EngramServerMismatchException`; turn it off with `engram.spring-ai.chat-memory-repository: false` |
+| `EngramChatMemoryRepository` | Off by default (`engram.spring-ai.chat-memory-repository: true` turns it on). `jamjet-engram-server` 0.5.0 does not serve the routes it reads with, so on that server its reads throw `EngramServerMismatchException` |
 
 You can disable any of them via `application.yml`:
 

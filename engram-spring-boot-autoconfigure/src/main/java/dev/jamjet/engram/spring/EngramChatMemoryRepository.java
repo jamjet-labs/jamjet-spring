@@ -28,13 +28,12 @@ import java.util.Map;
  *
  * <h2>Usage</h2>
  *
- * <p>Auto-configured by default when Spring AI and Engram are both on the
- * classpath. Disable with:
+ * <p>Off by default. Turn it on with:
  *
  * <pre>{@code
  * engram:
  *   spring-ai:
- *     chat-memory-repository: false
+ *     chat-memory-repository: true
  * }</pre>
  *
  * <p>Then wire it into a {@code MessageWindowChatMemory}:
@@ -55,7 +54,8 @@ import java.util.Map;
  * {@code GET} and {@code DELETE /v1/memory/messages/{conversation_id}}.
  * jamjet-engram-server 0.5.0 does not match those routes, so on that server
  * {@link #findByConversationId} and {@link #deleteByConversationId} throw
- * {@link EngramServerMismatchException} rather than returning an empty history.
+ * {@link EngramServerMismatchException} rather than returning an empty history,
+ * which is why the repository is off by default.
  * A route the server does not serve always throws; a server error or a
  * connection failure is logged and reads return an empty list, as before.
  *
@@ -76,10 +76,12 @@ public class EngramChatMemoryRepository implements ChatMemoryRepository {
 
     @Override
     public List<String> findConversationIds() {
+        boolean interruptedBefore = Thread.currentThread().isInterrupted();
         try {
             return client.listConversations(
                     properties.getDefaultUserId(), properties.getDefaultOrgId());
         } catch (Exception e) {
+            EngramSdkInterrupts.undo(e, interruptedBefore);
             EngramRoutes.throwIfNotServed(e, EngramRoutes.LIST_CONVERSATIONS, properties.getBaseUrl());
             log.warn("Failed to list conversations: {}", e.getMessage());
             return List.of();
@@ -88,12 +90,14 @@ public class EngramChatMemoryRepository implements ChatMemoryRepository {
 
     @Override
     public List<Message> findByConversationId(String conversationId) {
+        boolean interruptedBefore = Thread.currentThread().isInterrupted();
         try {
             List<Map<String, Object>> raw = client.getMessages(
                     conversationId, null,
                     properties.getDefaultUserId(), properties.getDefaultOrgId());
             return toMessages(raw);
         } catch (Exception e) {
+            EngramSdkInterrupts.undo(e, interruptedBefore);
             EngramRoutes.throwIfNotServed(e, EngramRoutes.GET_MESSAGES, properties.getBaseUrl());
             log.warn("Failed to get messages for conversation {}: {}", conversationId, e.getMessage());
             return List.of();
@@ -102,6 +106,7 @@ public class EngramChatMemoryRepository implements ChatMemoryRepository {
 
     @Override
     public void saveAll(String conversationId, List<Message> messages) {
+        boolean interruptedBefore = Thread.currentThread().isInterrupted();
         try {
             List<Map<String, String>> raw = new ArrayList<>();
             for (Message msg : messages) {
@@ -112,6 +117,7 @@ public class EngramChatMemoryRepository implements ChatMemoryRepository {
             client.saveMessages(conversationId, raw,
                     properties.getDefaultUserId(), properties.getDefaultOrgId());
         } catch (Exception e) {
+            EngramSdkInterrupts.undo(e, interruptedBefore);
             EngramRoutes.throwIfNotServed(e, EngramRoutes.SAVE_MESSAGES, properties.getBaseUrl());
             log.error("Failed to save messages for conversation {}: {}", conversationId, e.getMessage());
             throw new RuntimeException("Engram message save failed", e);
@@ -120,10 +126,12 @@ public class EngramChatMemoryRepository implements ChatMemoryRepository {
 
     @Override
     public void deleteByConversationId(String conversationId) {
+        boolean interruptedBefore = Thread.currentThread().isInterrupted();
         try {
             client.deleteMessages(conversationId,
                     properties.getDefaultUserId(), properties.getDefaultOrgId());
         } catch (Exception e) {
+            EngramSdkInterrupts.undo(e, interruptedBefore);
             EngramRoutes.throwIfNotServed(e, EngramRoutes.DELETE_MESSAGES, properties.getBaseUrl());
             log.warn("Failed to delete messages for conversation {}: {}", conversationId, e.getMessage());
         }

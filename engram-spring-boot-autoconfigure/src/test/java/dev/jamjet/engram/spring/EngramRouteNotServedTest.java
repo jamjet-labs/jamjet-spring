@@ -9,6 +9,7 @@ import org.springframework.ai.chat.client.ChatClientRequest;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.prompt.Prompt;
 
+import java.net.ServerSocket;
 import java.util.List;
 import java.util.Map;
 
@@ -95,7 +96,52 @@ class EngramRouteNotServedTest {
         assertThat(enriched.prompt().getInstructions().get(0).getText()).isEqualTo("<memory>likes tea</memory>");
     }
 
+    private static EngramClient clientForAClosedPort() throws Exception {
+        int port;
+        try (var socket = new ServerSocket(0)) {
+            port = socket.getLocalPort();
+        }
+        return new EngramClient(EngramConfig.builder().baseUrl("http://127.0.0.1:" + port).build());
+    }
+
+    @Test
+    void aConnectionFailureDoesNotLeaveTheThreadInterrupted() throws Exception {
+        // jamjet-sdk 0.5.0 interrupts the calling thread on any IOException, which
+        // made the model call that follows on the same thread fail.
+        var advisor = new EngramContextAdvisor(clientForAClosedPort(), properties);
+        var original = request("what do I like?");
+        try {
+            assertThat(advisor.before(original, null)).isSameAs(original);
+            assertThat(Thread.currentThread().isInterrupted()).isFalse();
+        } finally {
+            Thread.interrupted();
+        }
+    }
+
+    @Test
+    void aRealInterruptIsKept() throws Exception {
+        var advisor = new EngramContextAdvisor(clientForAClosedPort(), properties);
+        Thread.currentThread().interrupt();
+        try {
+            advisor.before(request("what do I like?"), null);
+            assertThat(Thread.currentThread().isInterrupted()).isTrue();
+        } finally {
+            Thread.interrupted();
+        }
+    }
+
     // ── EngramChatMemoryRepository ───────────────────────────────────────────
+
+    @Test
+    void repositoryConnectionFailureDoesNotLeaveTheThreadInterrupted() throws Exception {
+        var repository = new EngramChatMemoryRepository(clientForAClosedPort(), properties);
+        try {
+            assertThat(repository.findByConversationId("conv-1")).isEmpty();
+            assertThat(Thread.currentThread().isInterrupted()).isFalse();
+        } finally {
+            Thread.interrupted();
+        }
+    }
 
     @Test
     void repositoryThrowsInsteadOfReturningNoHistory() {

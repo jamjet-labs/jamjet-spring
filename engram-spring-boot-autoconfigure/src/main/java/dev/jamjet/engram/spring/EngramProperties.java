@@ -159,12 +159,13 @@ public class EngramProperties {
         }
 
         /**
-         * When {@code true} (default), Engram auto-registers a
+         * When {@code true}, Engram registers an
          * {@link EngramChatMemoryRepository} as the
          * {@link org.springframework.ai.chat.memory.ChatMemoryRepository} bean.
-         * Set to {@code false} to provide your own implementation.
+         * Default: {@code false}, because jamjet-engram-server 0.5.0 does not
+         * serve the routes it reads and deletes with.
          */
-        private boolean chatMemoryRepository = true;
+        private boolean chatMemoryRepository = false;
 
         public boolean isChatMemoryRepository() {
             return chatMemoryRepository;

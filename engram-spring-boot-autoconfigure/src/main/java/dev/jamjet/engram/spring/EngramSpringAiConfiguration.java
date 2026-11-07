@@ -53,7 +53,7 @@ public class EngramSpringAiConfiguration {
     @ConditionalOnClass(ChatMemoryRepository.class)
     @ConditionalOnMissingBean(ChatMemoryRepository.class)
     @ConditionalOnProperty(prefix = "engram.spring-ai", name = "chat-memory-repository",
-                           havingValue = "true", matchIfMissing = true)
+                           havingValue = "true")
     public EngramChatMemoryRepository engramChatMemoryRepository(
             EngramClient client, EngramProperties properties) {
         log.info("Registering Engram ChatMemoryRepository for Spring AI");

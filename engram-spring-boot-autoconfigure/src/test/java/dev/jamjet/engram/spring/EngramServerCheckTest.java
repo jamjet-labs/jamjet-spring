@@ -128,6 +128,40 @@ class EngramServerCheckTest {
     }
 
     @Test
+    void refusesToStartOnARedirect() throws Exception {
+        try (var server = StubEngramServer.empty().answer("GET", "/health", 302, "")) {
+            runner.withPropertyValues("engram.base-url=" + server.baseUrl()).run(context -> {
+                assertThat(context).hasFailed();
+                assertThat(context.getStartupFailure())
+                        .hasRootCauseInstanceOf(EngramServerMismatchException.class)
+                        .rootCause()
+                        .hasMessageContaining("HTTP 302");
+            });
+        }
+    }
+
+    @Test
+    void refusesToStartOnABadRequest() throws Exception {
+        try (var server = StubEngramServer.empty().answer("GET", "/health", 400, "{}")) {
+            runner.withPropertyValues("engram.base-url=" + server.baseUrl()).run(context -> {
+                assertThat(context).hasFailed();
+                assertThat(context.getStartupFailure())
+                        .hasRootCauseInstanceOf(EngramServerMismatchException.class);
+            });
+        }
+    }
+
+    @Test
+    void startsWithAWarningWhenRateLimited(CapturedOutput output) throws Exception {
+        try (var server = StubEngramServer.empty().answer("GET", "/health", 429, "{}")) {
+            runner.withPropertyValues("engram.base-url=" + server.baseUrl()).run(context -> {
+                assertThat(context).hasNotFailed();
+            });
+        }
+        assertThat(output).contains("could not check the Engram server").contains("HTTP 429");
+    }
+
+    @Test
     void theCheckCanBeTurnedOff() throws Exception {
         try (var server = StubEngramServer.python()) {
             runner.withPropertyValues("engram.base-url=" + server.baseUrl(), "engram.verify-on-startup=false")

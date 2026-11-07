@@ -105,6 +105,7 @@ public class EngramContextAdvisor implements BaseAdvisor {
             return request;
         }
 
+        boolean interruptedBefore = Thread.currentThread().isInterrupted();
         try {
             Map<String, Object> context = client.context(
                     query, userId, orgId, tokenBudget, "system_prompt");
@@ -121,6 +122,7 @@ public class EngramContextAdvisor implements BaseAdvisor {
             return injectMemoryMessage(request, memoryText);
 
         } catch (Exception e) {
+            EngramSdkInterrupts.undo(e, interruptedBefore);
             EngramRoutes.throwIfNotServed(e, EngramRoutes.CONTEXT, properties.getBaseUrl());
             log.warn("Engram context lookup failed, proceeding without memory: {}", e.getMessage());
             return request;

@@ -14,6 +14,7 @@ Built against Spring Boot 3.4 and Spring AI 1.0.
 - Approval decisions are bound to the request the reviewer saw (`content_digest`), recorded on the runtime, need an authenticated reviewer with `ROLE_JAMJET_APPROVER`, and the caller cannot approve its own call. A paused call is never left waiting on a runtime error.
 - LangChain4j chat memory is keyed by a namespace (`JamjetConfig.memoryNamespace`), and both the store and the durable agent fail closed by default.
 - `JamjetTestContainer` runs `jamjetdev/jamjet:0.5.0` (it pointed at an image that does not exist), and the replay module reads the runtime's event shape.
+- Testcontainers 1.20.4 to 1.21.4. 1.20.4 only spoke Docker API 1.32, which current Docker Engine refuses ("client version 1.32 is too old"), so `JamjetTestContainer` and `@WithJamjetRuntime` could not start a container there.
 
 ### Engram starter
 

@@ -1,13 +1,10 @@
 # jamjet-spring-boot-starter
 
-> **Heads up:** active development of this Spring Boot starter is moving
-> under [`jamjet-runtime-java/modules/spring-boot-starter`](https://github.com/jamjet-labs/jamjet-runtime-java) in the next JVM runtime release.
-> **Maven coordinates remain unchanged**: `dev.jamjet:jamjet-spring-boot-starter`.
-> This repo will receive a redirect README and be archived after the next JVM release confirms a clean Maven publish from the new path.
+> **Two JamJet starters.** This repo is `dev.jamjet:jamjet-spring-boot-starter`: Spring AI and LangChain4j calls recorded on a JamJet runtime you run as a server, over HTTP. If you want the JVM runtime embedded in your application with no separate server, that is a different artifact, `dev.jamjet:jamjet-runtime-spring-boot-starter`, from [jamjet-runtime-java](https://github.com/jamjet-labs/jamjet-runtime-java).
 
 Spring Boot starter for [JamJet](https://jamjet.dev). Add one dependency and every call through a `ChatClient` built from the auto-configured `ChatClient.Builder` is recorded on the JamJet runtime as an execution with an event log, with optional human approval before the model is called.
 
-> **Upgrading from 0.1.0:** 0.1.0 called `/api/v1/...` routes the runtime never served. The runtime answered them with its web UI (`200 text/html`), the advisors logged a warning and carried on, and nothing was recorded. 0.2.0 calls the runtime's real routes and refuses calls it cannot record (see [When the runtime is unavailable](#when-the-runtime-is-unavailable)). LangChain4j chat memory is now keyed by a namespace (see [LangChain4j Integration](#langchain4j-integration-langchain4j-jamjet)), so memory written by a pre-release 0.2.0 build without one is not found and conversations start empty. Those executions stay on the runtime; read their `chat_memory` events with `GET /executions/{id}/events` if you need to carry history over.
+> **Upgrading from 0.1.0:** 0.1.0 called `/api/v1/...` routes the runtime never served. The runtime answered them with its web UI (`200 text/html`), the advisors logged a warning and carried on, and nothing was recorded. 0.2.1 calls the runtime's real routes and refuses calls it cannot record (see [When the runtime is unavailable](#when-the-runtime-is-unavailable)). LangChain4j chat memory is now keyed by a namespace (see [LangChain4j Integration](#langchain4j-integration-langchain4j-jamjet)), so memory written by a pre-release build without one is not found and conversations start empty. Those executions stay on the runtime; read their `chat_memory` events with `GET /executions/{id}/events` if you need to carry history over. There is no 0.2.0 of the JamJet modules on Maven Central: an earlier Engram release already used that version, so the first release with these fixes is 0.2.1.
 
 ## Quickstart
 
@@ -17,7 +14,7 @@ Spring Boot starter for [JamJet](https://jamjet.dev). Add one dependency and eve
 <dependency>
     <groupId>dev.jamjet</groupId>
     <artifactId>jamjet-spring-boot-starter</artifactId>
-    <version>0.2.0</version>
+    <version>0.2.1</version>
 </dependency>
 ```
 
@@ -190,7 +187,10 @@ On a `ChatClient` built from the auto-configured `ChatClient.Builder`, a call ma
 | `jamjet-spring-boot-starter` | Starter POM (add this to your project) |
 | `jamjet-spring-boot-starter-test` | JUnit 5 replay testing and a runtime Testcontainer |
 | `langchain4j-jamjet` | LangChain4j durable agent and chat memory store |
-| `jamjet-spring-boot-starter-example` | Example application |
+| `engram-spring-boot-starter` | Engram memory for Spring AI (see [Engram memory](#engram-memory-engram-spring-boot-starter)) |
+| `engram-spring-boot-autoconfigure` | Auto-configuration behind the Engram starter |
+| `jamjet-spring-boot-starter-example` | Example application (not published) |
+| `engram-spring-boot-starter-example` | Engram example application (not published) |
 
 ## Requirements
 
@@ -205,7 +205,7 @@ On a `ChatClient` built from the auto-configured `ChatClient.Builder`, a call ma
 <dependency>
     <groupId>dev.jamjet</groupId>
     <artifactId>jamjet-spring-boot-starter-test</artifactId>
-    <version>0.2.0</version>
+    <version>0.2.1</version>
     <scope>test</scope>
 </dependency>
 ```
@@ -279,7 +279,7 @@ Span names you build this way: `jamjet.execution`, `jamjet.node.{id}`, `jamjet.t
 <dependency>
     <groupId>dev.jamjet</groupId>
     <artifactId>langchain4j-jamjet</artifactId>
-    <version>0.2.0</version>
+    <version>0.2.1</version>
 </dependency>
 ```
 
@@ -316,12 +316,37 @@ The runtime has no lookup by input, so the first access to a memory id in a proc
 
 Both refuse to run unrecorded by default (`JamjetGovernanceException`); `new JamjetConfig().onRuntimeError(RuntimeErrorMode.FAIL_OPEN)` lets calls run and reads fall back to an empty memory instead.
 
+## Engram memory (`engram-spring-boot-starter`)
+
+```xml
+<dependency>
+    <groupId>dev.jamjet</groupId>
+    <artifactId>engram-spring-boot-starter</artifactId>
+    <version>0.2.1</version>
+</dependency>
+```
+
+The starter talks to the **Rust Engram server** (`jamjet-engram-server` 0.5.x on crates.io, started with `engram serve --mode rest`). The Python Engram server (`jamjet-engram` on PyPI) serves different routes and is not supported yet.
+
+```properties
+engram.base-url=http://localhost:9090
+```
+
+**Token.** The client sends `Authorization: Bearer <token>` taken from `engram.api-token`, else the `ENGRAM_AUTH_TOKEN` environment variable (the name Engram uses for its server token), else `ENGRAM_TOKEN`, which still works but is deprecated and logs a warning. `jamjet-engram-server` 0.5.0 does not check a token itself, so keep it on a private network or behind a proxy that does.
+
+**Startup check.** On startup the starter calls `GET /health` once and expects the Rust server's answer. Against the Python server, another service or a server that rejects the token, the application fails to start with `EngramServerMismatchException`, which says what it found. An unreachable server only logs a warning. Turn the check off with `engram.verify-on-startup=false`.
+
+**Wrong routes fail loudly.** If a route answers 404 or 405 at runtime, `EngramContextAdvisor` and `EngramChatMemoryRepository` throw `EngramServerMismatchException` naming the route. A server error or a connection failure is still logged, and the call goes on without memory.
+
+**Chat memory repository.** `EngramChatMemoryRepository` reads and deletes a conversation with `GET` and `DELETE /v1/memory/messages/{conversation_id}`. `jamjet-engram-server` 0.5.0 does not match those routes for any conversation id, so on that server reads throw `EngramServerMismatchException` (earlier versions returned an empty history without saying so). Until a fixed server is released, set `engram.spring-ai.chat-memory-repository=false` and use another `ChatMemoryRepository`. The context advisor (`POST /v1/memory/context`) is not affected.
+
 ## Building
 
 ```bash
 mvn -Dgpg.skip verify            # unit tests
 mvn -Dgpg.skip -Pit verify       # plus RuntimeContractIT against a real runtime (Docker)
 JAMJET_IT_RUNTIME_URL=http://localhost:7700 mvn -Dgpg.skip -Pit verify   # use a runtime you started (dev mode)
+python3 scripts/check_release_version.py   # fails if any module's version is already on Maven Central
 ```
 
 ## License

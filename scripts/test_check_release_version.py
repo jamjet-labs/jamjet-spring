@@ -4,6 +4,7 @@ Run: python3 -m unittest discover -s scripts -p 'test_*.py'
 """
 
 import http.server
+import re
 import shutil
 import subprocess
 import sys
@@ -40,13 +41,13 @@ class CheckReleaseVersionTest(unittest.TestCase):
         client = "jamjet-spring-boot-autoconfigure/src/main/java/dev/jamjet/spring/client/JamjetRuntimeClient.java"
         (self.root / client).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(REPO / client, self.root / client)
+        # A fixed release version, so the tests do not depend on the repo's own
+        # version (a -SNAPSHOT skips the Central check).
+        self.version = "9.9.9"
+        self.set_version(self.version)
         git(self.root, "init", "-q")
         git(self.root, "add", "-A")
         git(self.root, "commit", "-q", "-m", "release")
-        self.version = subprocess.run(
-            [sys.executable, "-c", "import xml.etree.ElementTree as E;"
-             "print(E.parse('pom.xml').getroot().find('{http://maven.apache.org/POM/4.0.0}version').text)"],
-            cwd=self.root, capture_output=True, text=True, check=True).stdout.strip()
         # A fake Central that has nothing yet.
         self.central = self.tmp / "central"
         self.central.mkdir()
@@ -96,6 +97,40 @@ class CheckReleaseVersionTest(unittest.TestCase):
         git(self.root, "tag", f"v{self.version}")
         git(self.root, "checkout", "-q", "work")
         self.assertEqual(self.run_check("--allow-released-tag").returncode, 1)
+
+    def set_version(self, version):
+        for pom in [self.root / "pom.xml", *self.root.glob("*/pom.xml")]:
+            text = pom.read_text()
+            text = re.sub(r"(<artifactId>jamjet-spring-boot-parent</artifactId>\s*<version>)[^<]+(</version>)",
+                          rf"\g<1>{version}\g<2>", text, count=1)
+            pom.write_text(text)
+        client = next(self.root.rglob("JamjetRuntimeClient.java"))
+        client.write_text(re.sub(r'"jamjet-spring-boot-starter/[^"]+"', f'"jamjet-spring-boot-starter/{version}"',
+                                 client.read_text()))
+
+    def commit_version(self, version, readme=None):
+        self.set_version(version)
+        if readme is not None:
+            (self.root / "README.md").write_text(readme)
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-q", "-m", version)
+
+    def test_a_snapshot_line_may_show_the_release_it_prepared(self):
+        self.commit_version("0.4.0")
+        self.commit_version("0.5.0-SNAPSHOT", "dev.jamjet:jamjet-spring-boot-starter:0.4.0\n")
+        self.assertEqual(self.run_check().returncode, 1, "0.4.0 is not on Central yet")
+        self.assertEqual(self.run_check("--allow-pending-release").returncode, 0)
+
+    def test_the_pending_release_is_only_the_latest_one(self):
+        self.commit_version("0.3.9")
+        self.commit_version("0.4.0")
+        self.commit_version("0.5.0-SNAPSHOT", "dev.jamjet:jamjet-spring-boot-starter:0.3.9\n")
+        self.assertEqual(self.run_check("--allow-pending-release").returncode, 1)
+
+    def test_the_pending_release_covers_only_published_modules(self):
+        self.commit_version("0.4.0")
+        self.commit_version("0.5.0-SNAPSHOT", "dev.jamjet:jamjet-spring-boot-starter-example:0.4.0\n")
+        self.assertEqual(self.run_check("--allow-pending-release").returncode, 1)
 
     def test_network_error_never_passes(self):
         result = subprocess.run([sys.executable, str(SCRIPT), "--root", str(self.root),

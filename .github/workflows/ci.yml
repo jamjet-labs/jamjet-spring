@@ -25,7 +25,9 @@ jobs:
       # released it from an ancestor tag v<version> and has not bumped yet),
       # versions disagree, or a README shows dev.jamjet coordinates nobody can
       # download. mvn deploy runs the same script without the flag.
-      - run: python3 scripts/check_release_version.py --allow-released-tag
+      # --allow-pending-release: on a -SNAPSHOT line, docs may show the release
+      # this line prepared (its last non-SNAPSHOT version) before it is published.
+      - run: python3 scripts/check_release_version.py --allow-released-tag --allow-pending-release
 
   build:
     name: Build and unit tests

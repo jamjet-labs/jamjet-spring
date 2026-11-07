@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "release/**"]
   pull_request:
   schedule:
     # Weekly, so a new Spring AI release candidate that breaks the build shows up
@@ -13,6 +13,20 @@ permissions:
   contents: read
 
 jobs:
+  release-version:
+    name: Version and coordinates against Maven Central
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # tags, for --allow-released-tag
+      - run: python3 -m unittest discover -s scripts -p 'test_*.py'
+      # Fails if a module's version is already on Central (unless this branch
+      # released it from an ancestor tag v<version> and has not bumped yet),
+      # versions disagree, or a README shows dev.jamjet coordinates nobody can
+      # download. mvn deploy runs the same script without the flag.
+      - run: python3 scripts/check_release_version.py --allow-released-tag
+
   build:
     name: Build and unit tests
     runs-on: ubuntu-latest

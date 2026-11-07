@@ -10,6 +10,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
+import org.springframework.core.env.Environment;
 
 /**
  * Auto-configuration for Engram — a durable memory layer for AI agents.
@@ -19,9 +20,13 @@ import org.springframework.context.annotation.Bean;
  *
  * <h2>Minimum configuration</h2>
  *
- * Add the starter dependency. An Engram REST server must be running on
- * {@code http://localhost:9090} (the default) or set
- * {@code engram.base-url} to point somewhere else. Start the server with:
+ * Add the starter dependency. The Rust Engram REST server
+ * (jamjet-engram-server) must be running on {@code http://localhost:9090}
+ * (the default) or set {@code engram.base-url} to point somewhere else. The
+ * Python Engram server serves different routes and is not supported; at
+ * startup the starter checks {@code GET /health} and refuses to start against
+ * a server that is not the Rust one (see {@code engram.verify-on-startup}).
+ * Start the server with:
  *
  * <pre>{@code
  * cargo install jamjet-engram-server
@@ -34,8 +39,9 @@ import org.springframework.context.annotation.Bean;
  * engram:
  *   enabled: true              # default true
  *   base-url: http://localhost:9090
- *   api-token: ${ENGRAM_TOKEN:} # optional
+ *   api-token: ${ENGRAM_AUTH_TOKEN:} # optional; ENGRAM_AUTH_TOKEN is also read directly
  *   timeout-seconds: 30
+ *   verify-on-startup: true    # default true
  *   default-user-id: alice     # optional
  *   default-org-id: default    # optional
  *   health:
@@ -71,13 +77,47 @@ public class EngramAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    public EngramClient engramClient(EngramProperties properties) {
+    public EngramClient engramClient(EngramProperties properties, Environment environment) {
         log.info("Configuring Engram memory client -> {}", properties.getBaseUrl());
+        String token = EngramTokens.resolve(properties, environment);
         EngramConfig config = EngramConfig.builder()
                 .baseUrl(properties.getBaseUrl())
-                .apiToken(properties.getApiToken())
+                .apiToken(token)
                 .timeoutSeconds(properties.getTimeoutSeconds())
                 .build();
+        if (config.apiToken() != null && sendsInTheClear(config.baseUrl())) {
+            log.warn("Engram: sending the Engram token over plain HTTP to {}. Use https unless the "
+                    + "network between this application and Engram is private.", config.baseUrl());
+        }
+        if (properties.isVerifyOnStartup()) {
+            new EngramServerCheck(config.baseUrl(), config.apiToken(), properties.getTimeoutSeconds()).verify();
+        }
         return new EngramClient(config);
+    }
+
+    private static final java.util.regex.Pattern IPV4_LOOPBACK =
+            java.util.regex.Pattern.compile("127(\\.(25[0-5]|2[0-4]\\d|1?\\d?\\d)){3}");
+
+    /** True for {@code http://} to anything but localhost, 127.0.0.0/8 or [::1]. */
+    static boolean sendsInTheClear(String baseUrl) {
+        int schemeEnd = baseUrl.indexOf("://");
+        if (schemeEnd < 0 || !baseUrl.substring(0, schemeEnd).equalsIgnoreCase("http")) {
+            return false;
+        }
+        // Read the authority by hand: URI.getHost() is null for names with "_".
+        String authority = baseUrl.substring(schemeEnd + 3).split("[/?#]", 2)[0];
+        authority = authority.substring(authority.lastIndexOf('@') + 1);
+        String host;
+        if (authority.startsWith("[")) {
+            int close = authority.indexOf(']');
+            host = close < 0 ? authority : authority.substring(0, close + 1);
+        } else {
+            int colon = authority.lastIndexOf(':');
+            host = colon < 0 ? authority : authority.substring(0, colon);
+        }
+        boolean loopback = host.equalsIgnoreCase("localhost")
+                || IPV4_LOOPBACK.matcher(host).matches()
+                || host.equals("[::1]");
+        return !loopback;
     }
 }

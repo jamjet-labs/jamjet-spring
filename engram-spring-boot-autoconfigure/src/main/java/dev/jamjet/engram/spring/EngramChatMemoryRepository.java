@@ -49,6 +49,16 @@ import java.util.Map;
  * }
  * }</pre>
  *
+ * <h2>Server support</h2>
+ *
+ * <p>Reading and deleting a conversation need
+ * {@code GET} and {@code DELETE /v1/memory/messages/{conversation_id}}.
+ * jamjet-engram-server 0.5.0 does not match those routes, so on that server
+ * {@link #findByConversationId} and {@link #deleteByConversationId} throw
+ * {@link EngramServerMismatchException} rather than returning an empty history.
+ * A route the server does not serve always throws; a server error or a
+ * connection failure is logged and reads return an empty list, as before.
+ *
  * @see EngramContextAdvisor
  * @see ChatMemoryRepository
  */
@@ -70,6 +80,7 @@ public class EngramChatMemoryRepository implements ChatMemoryRepository {
             return client.listConversations(
                     properties.getDefaultUserId(), properties.getDefaultOrgId());
         } catch (Exception e) {
+            EngramRoutes.throwIfNotServed(e, EngramRoutes.LIST_CONVERSATIONS, properties.getBaseUrl());
             log.warn("Failed to list conversations: {}", e.getMessage());
             return List.of();
         }
@@ -83,6 +94,7 @@ public class EngramChatMemoryRepository implements ChatMemoryRepository {
                     properties.getDefaultUserId(), properties.getDefaultOrgId());
             return toMessages(raw);
         } catch (Exception e) {
+            EngramRoutes.throwIfNotServed(e, EngramRoutes.GET_MESSAGES, properties.getBaseUrl());
             log.warn("Failed to get messages for conversation {}: {}", conversationId, e.getMessage());
             return List.of();
         }
@@ -100,6 +112,7 @@ public class EngramChatMemoryRepository implements ChatMemoryRepository {
             client.saveMessages(conversationId, raw,
                     properties.getDefaultUserId(), properties.getDefaultOrgId());
         } catch (Exception e) {
+            EngramRoutes.throwIfNotServed(e, EngramRoutes.SAVE_MESSAGES, properties.getBaseUrl());
             log.error("Failed to save messages for conversation {}: {}", conversationId, e.getMessage());
             throw new RuntimeException("Engram message save failed", e);
         }
@@ -111,6 +124,7 @@ public class EngramChatMemoryRepository implements ChatMemoryRepository {
             client.deleteMessages(conversationId,
                     properties.getDefaultUserId(), properties.getDefaultOrgId());
         } catch (Exception e) {
+            EngramRoutes.throwIfNotServed(e, EngramRoutes.DELETE_MESSAGES, properties.getBaseUrl());
             log.warn("Failed to delete messages for conversation {}: {}", conversationId, e.getMessage());
         }
     }

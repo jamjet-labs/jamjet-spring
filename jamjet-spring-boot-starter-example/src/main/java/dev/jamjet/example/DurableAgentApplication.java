@@ -30,7 +30,7 @@ public class DurableAgentApplication {
 
     @Bean
     ChatClient chatClient(ChatClient.Builder builder) {
-        // JamjetDurabilityAdvisor is auto-injected via ChatClientCustomizer — no manual setup
+        // JamjetDurabilityAdvisor is auto-injected via ChatClientBuilderCustomizer — no manual setup
         return builder.build();
     }
 

@@ -25,7 +25,13 @@ when the tag v<version> exists and is an ancestor of HEAD, i.e. this branch is
 the line that released it and has not bumped yet. Without the flag (the
 deploy-phase run in the parent POM) a released version always fails.
 
-Usage: python3 scripts/check_release_version.py [--root DIR] [--central URL] [--allow-released-tag]
+--allow-pending-release (CI only): on a -SNAPSHOT build, check 3 also accepts
+docs that show a published module at the pending release P, the most recent
+non-SNAPSHOT root version in HEAD's history (the release this line prepared,
+which may not be on Central yet). Older versions are never excused.
+
+Usage: python3 scripts/check_release_version.py [--root DIR] [--central URL]
+       [--allow-released-tag] [--allow-pending-release]
 """
 
 from __future__ import annotations
@@ -145,12 +151,30 @@ def released_from_this_line(root: Path, version: str) -> bool:
         return False
 
 
+def pending_release(root: Path) -> str | None:
+    """The most recent non-SNAPSHOT root POM version in HEAD's history, or None."""
+    try:
+        commits = subprocess.run(["git", "log", "--format=%H", "--", "pom.xml"], cwd=root, check=True,
+                                 capture_output=True, text=True).stdout.split()
+        for commit in commits:
+            pom = subprocess.run(["git", "show", f"{commit}:pom.xml"], cwd=root, check=True,
+                                 capture_output=True, text=True).stdout
+            version = text(ET.fromstring(pom), "m:version")
+            if version and not version.endswith("-SNAPSHOT"):
+                return version
+    except (OSError, subprocess.CalledProcessError, ET.ParseError):
+        pass
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--central", default=DEFAULT_CENTRAL)
     parser.add_argument("--allow-released-tag", action="store_true",
                         help="CI only: accept a version released from an ancestor tag v<version>")
+    parser.add_argument("--allow-pending-release", action="store_true",
+                        help="CI only: on a snapshot, docs may show the latest release in this line's history")
     args = parser.parse_args()
     root = args.root.resolve()
 
@@ -183,6 +207,9 @@ def main() -> int:
                         f"pick a version no module has released"
                     )
 
+        pending = pending_release(root) if snapshot and args.allow_pending_release else None
+        if pending:
+            print(f"pending release in this line's history: {pending}")
         checked: dict[tuple[str, str], bool] = {}
         for path in markdown_files(root):
             for line, artifact, doc_version in doc_coordinates(path):
@@ -190,6 +217,11 @@ def main() -> int:
                     continue
                 if not snapshot and doc_version == version and artifact in deployable:
                     continue  # published by this release
+                if pending and doc_version == pending and artifact in deployable:
+                    if not on_central(args.central, artifact, doc_version):
+                        print(f"{path.relative_to(root)}:{line}: {GROUP}:{artifact}:{doc_version} is the pending "
+                              f"release, not on Central yet")
+                    continue
                 key = (artifact, doc_version)
                 if key not in checked:
                     checked[key] = on_central(args.central, artifact, doc_version)

@@ -33,8 +33,71 @@ class ApprovalContentTest {
 
         String longPrompt = "x".repeat(10_000);
         assertThat(ApprovalContent.preview(new Prompt(new UserMessage(longPrompt))))
-                .hasSizeLessThanOrEqualTo(ApprovalContent.PREVIEW_LIMIT + 32)
-                .endsWith("[truncated]");
+                .hasSizeLessThanOrEqualTo(ApprovalContent.PREVIEW_LIMIT)
+                .contains("characters not shown");
+    }
+
+    private static org.springframework.ai.chat.messages.AssistantMessage toolCall(String id, String name, String args) {
+        return org.springframework.ai.chat.messages.AssistantMessage.builder().content("")
+                .toolCalls(java.util.List.of(new org.springframework.ai.chat.messages.AssistantMessage.ToolCall(
+                        id, "function", name, args))).build();
+    }
+
+    private static org.springframework.ai.chat.messages.ToolResponseMessage toolResult(String id, String name, String data) {
+        return org.springframework.ai.chat.messages.ToolResponseMessage.builder()
+                .responses(java.util.List.of(new org.springframework.ai.chat.messages.ToolResponseMessage.ToolResponse(
+                        id, name, data))).build();
+    }
+
+    /** Review probe: a 2.6k system prompt pushed the request and the new tool call out of the preview. */
+    @Test
+    void aLongSystemPromptDoesNotHideTheRequestOrTheNewestToolCall() {
+        var prompt = new Prompt(java.util.List.of(
+                new org.springframework.ai.chat.messages.SystemMessage("S".repeat(2600)),
+                new UserMessage("wire 100 to acct 42"),
+                toolCall("t1", "transfer_funds", "{\"amount\":100}"),
+                toolResult("t1", "transfer_funds", "ok")));
+
+        String preview = ApprovalContent.preview(prompt);
+
+        assertThat(preview).hasSizeLessThanOrEqualTo(ApprovalContent.PREVIEW_LIMIT)
+                .contains("[user] wire 100 to acct 42", "transfer_funds {\"amount\":100}", "[tool response] transfer_funds ok");
+    }
+
+    @Test
+    void toolCallsThatAlreadyRanAreLabelled() {
+        var prompt = new Prompt(java.util.List.of(new UserMessage("wire 100"),
+                toolCall("t1", "transfer_funds", "{}"), toolResult("t1", "transfer_funds", "ok")));
+
+        assertThat(ApprovalContent.preview(prompt)).contains("[assistant tool call, already executed] transfer_funds");
+    }
+
+    @Test
+    void manyRoundsKeepTheStartAndTheNewestContent() {
+        var messages = new java.util.ArrayList<org.springframework.ai.chat.messages.Message>();
+        messages.add(new UserMessage("wire 100 to acct 42"));
+        for (int i = 0; i < 40; i++) {
+            messages.add(toolCall("t" + i, "lookup_" + i, "{\"page\":" + i + "}"));
+            messages.add(toolResult("t" + i, "lookup_" + i, "x".repeat(40)));
+        }
+        messages.add(toolCall("tz", "transfer_funds", "{\"amount\":1000000}"));
+        messages.add(toolResult("tz", "transfer_funds", "ok"));
+
+        String preview = ApprovalContent.preview(new Prompt(messages));
+
+        assertThat(preview).hasSizeLessThanOrEqualTo(ApprovalContent.PREVIEW_LIMIT)
+                .contains("[user] wire 100 to acct 42", "transfer_funds {\"amount\":1000000}", "lines not shown");
+    }
+
+    @Test
+    void aSecondDecisionMarksWhatIsNewSinceTheLastApproval() {
+        var prompt = new Prompt(java.util.List.of(new UserMessage("wire 100"),
+                toolCall("t1", "transfer_funds", "{}"), toolResult("t1", "transfer_funds", "ok")));
+
+        String preview = ApprovalContent.preview(prompt, 1);
+
+        assertThat(preview).contains("[user] wire 100\n[--- new since the last approval ---]\n[assistant] \n"
+                + "[assistant tool call, already executed] transfer_funds");
     }
 
     // ── Everything the model receives is in the digest (ported from probe P4) ──
@@ -56,14 +119,82 @@ class ApprovalContentTest {
         assertThat(digestOf(a)).isNotEqualTo(digestOf(b));
     }
 
+    /** A tool as Spring AI 2.0 offers it: a callback with a definition and metadata. */
+    static org.springframework.ai.tool.ToolCallback tool(String name, String description, String inputSchema,
+                                                         boolean returnDirect) {
+        return new org.springframework.ai.tool.ToolCallback() {
+            @Override
+            public org.springframework.ai.tool.definition.ToolDefinition getToolDefinition() {
+                return org.springframework.ai.tool.definition.ToolDefinition.builder()
+                        .name(name).description(description).inputSchema(inputSchema).build();
+            }
+
+            @Override
+            public org.springframework.ai.tool.metadata.ToolMetadata getToolMetadata() {
+                return org.springframework.ai.tool.metadata.ToolMetadata.builder().returnDirect(returnDirect).build();
+            }
+
+            @Override
+            public String call(String toolInput) {
+                return toolInput;
+            }
+        };
+    }
+
+    private static String digestOfTools(org.springframework.ai.tool.ToolCallback... tools) {
+        return ApprovalContent.digest(new Prompt("send it",
+                org.springframework.ai.model.tool.ToolCallingChatOptions.builder().toolCallbacks(tools).build()));
+    }
+
     @Test
     void differentToolsOfferedGiveDifferentDigests() {
-        var read = new Prompt("send it", org.springframework.ai.model.tool.ToolCallingChatOptions.builder()
-                .toolNames("readBalance").build());
-        var wire = new Prompt("send it", org.springframework.ai.model.tool.ToolCallingChatOptions.builder()
-                .toolNames("sendWire").build());
+        assertThat(digestOfTools(tool("readBalance", "read", "{}", false)))
+                .isNotEqualTo(digestOfTools(tool("sendWire", "read", "{}", false)));
+        assertThat(digestOfTools(tool("readBalance", "read", "{}", false)))
+                .isNotEqualTo(digestOfTools(tool("readBalance", "read", "{}", false),
+                        tool("sendWire", "send money", "{}", false)));
+    }
 
-        assertThat(ApprovalContent.digest(read)).isNotEqualTo(ApprovalContent.digest(wire));
+    @Test
+    void aToolsDescriptionAndInputSchemaAreInTheDigest() {
+        String base = digestOfTools(tool("sendWire", "send money", "{\"type\":\"object\"}", false));
+
+        assertThat(base).isEqualTo(digestOfTools(tool("sendWire", "send money", "{\"type\":\"object\"}", false)));
+        assertThat(base).as("description")
+                .isNotEqualTo(digestOfTools(tool("sendWire", "send money anywhere", "{\"type\":\"object\"}", false)));
+        assertThat(base).as("input schema")
+                .isNotEqualTo(digestOfTools(tool("sendWire", "send money", "{\"type\":\"string\"}", false)));
+    }
+
+    @Test
+    void whetherAToolReturnsDirectlyIsInTheDigest() {
+        assertThat(digestOfTools(tool("sendWire", "send money", "{}", false)))
+                .isNotEqualTo(digestOfTools(tool("sendWire", "send money", "{}", true)));
+    }
+
+    /**
+     * The shape of what is digested. A field dropped from the canonical form (for
+     * example after a Spring AI upgrade removes the accessor it was read from) fails
+     * here even when no other test varies it.
+     */
+    @Test
+    void theCanonicalFormNamesEveryToolField() {
+        var options = org.springframework.ai.model.tool.ToolCallingChatOptions.builder()
+                .toolCallbacks(tool("sendWire", "send money", "{}", true))
+                .toolContext(java.util.Map.of("account", "42"))
+                .build();
+        @SuppressWarnings("unchecked")
+        var canonicalOptions = (java.util.Map<String, Object>) ApprovalContent.canonical(new Prompt("pay", options))
+                .get("options");
+
+        assertThat(canonicalOptions).containsOnlyKeys("type", "properties", "tool_definitions", "tool_context");
+        @SuppressWarnings("unchecked")
+        var definitions = (List<java.util.Map<String, Object>>) canonicalOptions.get("tool_definitions");
+        assertThat(definitions).singleElement().satisfies(d -> assertThat(d)
+                .containsOnlyKeys("name", "description", "input_schema", "return_direct")
+                .containsEntry("return_direct", true));
+        assertThat(canonicalOptions.get("tool_context"))
+                .asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.MAP).containsOnlyKeys("account");
     }
 
     @Test
@@ -76,15 +207,18 @@ class ApprovalContentTest {
 
     @Test
     void toolCallsAndToolResponsesAreInTheDigest() {
-        var lookup = new org.springframework.ai.chat.messages.AssistantMessage("", java.util.Map.of(), List.of(
-                new org.springframework.ai.chat.messages.AssistantMessage.ToolCall("t1", "function", "lookup", "{}")));
-        var wire = new org.springframework.ai.chat.messages.AssistantMessage("", java.util.Map.of(), List.of(
+        var lookup = org.springframework.ai.chat.messages.AssistantMessage.builder().content("").toolCalls(List.of(
+                new org.springframework.ai.chat.messages.AssistantMessage.ToolCall("t1", "function", "lookup", "{}")))
+                .build();
+        var wire = org.springframework.ai.chat.messages.AssistantMessage.builder().content("").toolCalls(List.of(
                 new org.springframework.ai.chat.messages.AssistantMessage.ToolCall("t1", "function", "sendWire",
-                        "{\"amount\":1000000}")));
-        var acct42 = new org.springframework.ai.chat.messages.ToolResponseMessage(List.of(
-                new org.springframework.ai.chat.messages.ToolResponseMessage.ToolResponse("t1", "lookup", "{\"acct\":\"42\"}")));
-        var acct666 = new org.springframework.ai.chat.messages.ToolResponseMessage(List.of(
-                new org.springframework.ai.chat.messages.ToolResponseMessage.ToolResponse("t1", "lookup", "{\"acct\":\"666\"}")));
+                        "{\"amount\":1000000}"))).build();
+        var acct42 = org.springframework.ai.chat.messages.ToolResponseMessage.builder().responses(List.of(
+                new org.springframework.ai.chat.messages.ToolResponseMessage.ToolResponse("t1", "lookup", "{\"acct\":\"42\"}")))
+                .build();
+        var acct666 = org.springframework.ai.chat.messages.ToolResponseMessage.builder().responses(List.of(
+                new org.springframework.ai.chat.messages.ToolResponseMessage.ToolResponse("t1", "lookup", "{\"acct\":\"666\"}")))
+                .build();
 
         assertThat(digestOf(new UserMessage("pay"), lookup)).isNotEqualTo(digestOf(new UserMessage("pay"), wire));
         assertThat(digestOf(new UserMessage("pay"), lookup, acct42))
@@ -97,10 +231,11 @@ class ApprovalContentTest {
     void thePreviewShowsRolesMediaToolCallsAndTools() {
         var prompt = new Prompt(List.of(new SystemMessage("be careful"),
                 UserMessage.builder().text("pay this").media(png((byte) 7)).build(),
-                new org.springframework.ai.chat.messages.AssistantMessage("", java.util.Map.of(), List.of(
+                org.springframework.ai.chat.messages.AssistantMessage.builder().content("").toolCalls(List.of(
                         new org.springframework.ai.chat.messages.AssistantMessage.ToolCall("t1", "function",
-                                "sendWire", "{\"amount\":5}")))),
-                org.springframework.ai.model.tool.ToolCallingChatOptions.builder().toolNames("sendWire").build());
+                                "sendWire", "{\"amount\":5}"))).build()),
+                org.springframework.ai.model.tool.ToolCallingChatOptions.builder()
+                        .toolCallbacks(tool("sendWire", "send money", "{}", false)).build());
 
         String preview = ApprovalContent.preview(prompt);
 
@@ -124,18 +259,21 @@ class ApprovalContentTest {
     }
 
     @Test
-    void truncationNeverSplitsACharacterOrAnEscape() {
+    void cuttingALongLineNeverSplitsACharacterOrAnEscape() {
         String emoji = new String(Character.toChars(0x1F4B8));
-        for (int pad = 0; pad < 8; pad++) {
-            String text = "y".repeat(ApprovalContent.PREVIEW_LIMIT - "[user] ".length() - pad)
-                    + (emoji + "\n").repeat(10);
+        for (int pad = 0; pad < 12; pad++) {
+            String text = "y".repeat(pad) + (emoji + "\n").repeat(1500);
             String preview = ApprovalContent.preview(new Prompt(new UserMessage(text)));
-            String body = preview.substring(0, preview.length() - " [truncated]".length());
+            int gap = preview.indexOf(" [... ");
+            assertThat(gap).as("a long line is cut with a marker").isPositive();
+            String head = preview.substring(0, gap);
+            String tail = preview.substring(preview.indexOf("not shown ...] ") + "not shown ...] ".length());
 
-            assertThat(preview).endsWith(" [truncated]");
-            assertThat(Character.isHighSurrogate(body.charAt(body.length() - 1))).isFalse();
-            assertThat(body).doesNotEndWith("\\");
-            assertThat(body.length()).isLessThanOrEqualTo(ApprovalContent.PREVIEW_LIMIT);
+            assertThat(Character.isHighSurrogate(head.charAt(head.length() - 1))).isFalse();
+            assertThat(head).doesNotEndWith("\\");
+            assertThat(Character.isLowSurrogate(tail.charAt(0))).isFalse();
+            assertThat(tail).doesNotStartWith("n").doesNotStartWith("\\n".substring(1));
+            assertThat(preview.length()).isLessThanOrEqualTo(ApprovalContent.PREVIEW_LIMIT);
         }
     }
 }

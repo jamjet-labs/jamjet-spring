@@ -19,7 +19,6 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.TreeSet;
 
@@ -29,9 +28,16 @@ import java.util.TreeSet;
  *
  * <p>Covered: every message's role and text, its media (MIME type and a SHA-256
  * of the bytes, or the URL), an assistant message's tool calls, a tool message's
- * responses, and the options (model, sampling settings, tool names and tool
- * definitions). Not covered: the tool calls Spring AI makes inside the model call
- * after approval; those are not individually reviewed here.
+ * responses, and the options (model, sampling settings, provider options, the tool
+ * definitions with their return-direct flag, and the tool context). Not covered:
+ * the tool calls Spring AI's tool-calling advisor runs after the model answered;
+ * those are not individually reviewed here.
+ *
+ * <p>Spring AI 2.0 removed the per-request tool names and the internal tool
+ * execution flag from {@link ToolCallingChatOptions}: the ChatClient resolves every
+ * tool to a callback before the advisors run, and a {@code ToolCallingAdvisor} in
+ * the advisor chain, not the model, runs the tool calls. The offered tools are
+ * therefore exactly the callbacks digested here.
  */
 public final class ApprovalContent {
 
@@ -51,6 +57,35 @@ public final class ApprovalContent {
             byte[] json = CANONICAL.writeValueAsBytes(canonical(prompt));
             return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(json));
         } catch (JsonProcessingException | NoSuchAlgorithmException e) {
+            throw new IllegalStateException("could not digest the prompt", e);
+        }
+    }
+
+    /** SHA-256 (hex) of each message's canonical form, in order. */
+    public static java.util.List<String> messageDigests(Prompt prompt) {
+        var out = new ArrayList<String>();
+        if (prompt != null) {
+            for (Message m : prompt.getInstructions()) {
+                out.add(messageDigest(m));
+            }
+        }
+        return out;
+    }
+
+    /** SHA-256 (hex) of one message's canonical form: role, text, media, tool calls, tool responses. */
+    public static String messageDigest(Message message) {
+        return sha256Of(message(message));
+    }
+
+    /** SHA-256 (hex) of the canonical options: every property, the tool definitions and the tool context. */
+    public static String optionsDigest(Prompt prompt) {
+        return sha256Of(prompt == null ? Map.of() : options(prompt.getOptions()));
+    }
+
+    private static String sha256Of(Object canonical) {
+        try {
+            return sha256(CANONICAL.writeValueAsBytes(canonical));
+        } catch (JsonProcessingException e) {
             throw new IllegalStateException("could not digest the prompt", e);
         }
     }
@@ -120,7 +155,7 @@ public final class ApprovalContent {
 
     /** Names handled explicitly below, or that cannot be serialized (tool callbacks hold code). */
     private static final java.util.Set<String> SPECIAL_PROPERTIES = java.util.Set.of(
-            "class", "toolCallbacks", "toolNames", "toolContext", "internalToolExecutionEnabled");
+            "class", "toolCallbacks", "toolContext");
 
     /**
      * Every readable property of the concrete options object (so provider-specific
@@ -146,7 +181,6 @@ public final class ApprovalContent {
         }
         out.put("properties", properties);
         if (options instanceof ToolCallingChatOptions tools) {
-            out.put("tool_names", tools.getToolNames() == null ? List.of() : new TreeSet<>(tools.getToolNames()));
             var definitions = new ArrayList<Map<String, Object>>();
             if (tools.getToolCallbacks() != null) {
                 for (ToolCallback cb : tools.getToolCallbacks()) {
@@ -154,12 +188,13 @@ public final class ApprovalContent {
                     d.put("name", cb.getToolDefinition().name());
                     d.put("description", cb.getToolDefinition().description());
                     d.put("input_schema", cb.getToolDefinition().inputSchema());
+                    // A return-direct tool's result goes to the caller instead of the model.
+                    d.put("return_direct", cb.getToolMetadata() != null && cb.getToolMetadata().returnDirect());
                     definitions.add(d);
                 }
             }
             definitions.sort(Comparator.comparing(d -> String.valueOf(d.get("name"))));
             out.put("tool_definitions", definitions);
-            out.put("internal_tool_execution", tools.getInternalToolExecutionEnabled());
             var context = new java.util.TreeMap<String, Object>();
             if (tools.getToolContext() != null) {
                 tools.getToolContext().forEach((k, v) -> context.put(k, plain(v)));
@@ -181,18 +216,51 @@ public final class ApprovalContent {
         }
     }
 
+    /** Lines longer than this are cut to their start and end when the preview is too long. */
+    private static final int LINE_LIMIT = 480;
+    private static final int LINE_HEAD = 300;
+    private static final int LINE_TAIL = 120;
+    /** Share of the limit kept from the start when whole lines must be left out. */
+    private static final int HEAD_BUDGET = PREVIEW_LIMIT * 2 / 5;
+
     /**
      * The request for a reviewer, one line per message ({@code [role] text}),
      * with media, tool calls, tool responses and offered tools. Control, line,
      * zero-width, bidirectional and tag characters are escaped, so the text
-     * cannot hide or reorder what the reviewer sees. Cut on a character boundary
-     * at {@link #PREVIEW_LIMIT}, with {@code " [truncated]"} only when something
-     * was cut.
+     * cannot hide or reorder what the reviewer sees. A tool call whose result is
+     * already in the request is labelled {@code already executed}: the tool loop
+     * ran it before this round reached the model.
+     *
+     * <p>At most {@link #PREVIEW_LIMIT} characters. When the request is longer,
+     * long lines keep their start and end with {@code [... N characters not shown ...]}
+     * between, and if that is not enough the first and the newest lines are kept
+     * with {@code [... N lines not shown ...]} between, so neither the original
+     * request nor the newest tool calls drop out.
      */
     public static String preview(Prompt prompt) {
+        return preview(prompt, 0);
+    }
+
+    /**
+     * {@link #preview(Prompt)} for a request whose first {@code approvedMessageCount}
+     * messages were already approved: a {@code [--- new since the last approval ---]}
+     * line marks where the new messages start.
+     */
+    public static String preview(Prompt prompt, int approvedMessageCount) {
         var lines = new ArrayList<String>();
         if (prompt != null) {
+            var executed = new java.util.HashSet<String>();
             for (Message m : prompt.getInstructions()) {
+                if (m instanceof ToolResponseMessage tm && tm.getResponses() != null) {
+                    tm.getResponses().forEach(r -> executed.add(r.id()));
+                }
+            }
+            var messages = prompt.getInstructions();
+            for (int i = 0; i < messages.size(); i++) {
+                Message m = messages.get(i);
+                if (approvedMessageCount > 0 && i == approvedMessageCount) {
+                    lines.add("[--- new since the last approval ---]");
+                }
                 String role = m.getMessageType().getValue();
                 lines.add("[" + role + "] " + escape(m.getText() == null ? "" : m.getText()));
                 if (m instanceof MediaContent mc && mc.getMedia() != null) {
@@ -204,7 +272,8 @@ public final class ApprovalContent {
                 }
                 if (m instanceof AssistantMessage am && am.getToolCalls() != null) {
                     for (var call : am.getToolCalls()) {
-                        lines.add("[assistant tool call] " + escape(call.name()) + " " + escape(call.arguments()));
+                        lines.add((executed.contains(call.id()) ? "[assistant tool call, already executed] "
+                                : "[assistant tool call] ") + escape(call.name()) + " " + escape(call.arguments()));
                     }
                 }
                 if (m instanceof ToolResponseMessage tm && tm.getResponses() != null) {
@@ -215,9 +284,6 @@ public final class ApprovalContent {
             }
             if (prompt.getOptions() instanceof ToolCallingChatOptions tools) {
                 var names = new TreeSet<String>();
-                if (tools.getToolNames() != null) {
-                    names.addAll(tools.getToolNames());
-                }
                 if (tools.getToolCallbacks() != null) {
                     tools.getToolCallbacks().forEach(cb -> names.add(cb.getToolDefinition().name()));
                 }
@@ -226,7 +292,100 @@ public final class ApprovalContent {
                 }
             }
         }
-        return bounded(String.join("\n", lines));
+        return fit(lines);
+    }
+
+    private static String fit(java.util.List<String> lines) {
+        String all = String.join("\n", lines);
+        if (all.length() <= PREVIEW_LIMIT) {
+            return all;
+        }
+        var shortened = new ArrayList<String>(lines.size());
+        for (String line : lines) {
+            shortened.add(line.length() > LINE_LIMIT ? shortenLine(line) : line);
+        }
+        all = String.join("\n", shortened);
+        if (all.length() <= PREVIEW_LIMIT) {
+            return all;
+        }
+        // Keep the first lines and the newest ones, leave out the middle.
+        int head = 0;
+        int used = 0;
+        while (head < shortened.size() && used + shortened.get(head).length() + 1 <= HEAD_BUDGET) {
+            used += shortened.get(head).length() + 1;
+            head++;
+        }
+        int reserve = 48; // the gap line
+        int tail = shortened.size();
+        while (tail > head && used + shortened.get(tail - 1).length() + 1 + reserve <= PREVIEW_LIMIT) {
+            used += shortened.get(tail - 1).length() + 1;
+            tail--;
+        }
+        var kept = new ArrayList<String>(shortened.subList(0, head));
+        kept.add("[... " + (tail - head) + " lines not shown ...]");
+        kept.addAll(shortened.subList(tail, shortened.size()));
+        return bounded(String.join("\n", kept));
+    }
+
+    /** First and last characters of an escaped line, never splitting a character or an escape. */
+    private static String shortenLine(String line) {
+        int headEnd = safeEnd(line, LINE_HEAD);
+        int tailStart = safeStart(line, line.length() - LINE_TAIL);
+        if (tailStart <= headEnd) {
+            return line;
+        }
+        return line.substring(0, headEnd) + " [... " + (tailStart - headEnd) + " characters not shown ...] "
+                + line.substring(tailStart);
+    }
+
+    /** An index at or before {@code end} that does not split a surrogate pair or an escape. */
+    private static int safeEnd(String text, int end) {
+        if (end >= text.length()) {
+            return text.length();
+        }
+        if (Character.isLowSurrogate(text.charAt(end)) && Character.isHighSurrogate(text.charAt(end - 1))) {
+            end--;
+        }
+        int backslash = lastEscapeStart(text, end);
+        if (backslash >= 0 && escapeEnd(text, backslash) > end) {
+            end = backslash;
+        }
+        return end;
+    }
+
+    /** An index at or after {@code start} that does not split a surrogate pair or an escape. */
+    private static int safeStart(String text, int start) {
+        if (start <= 0) {
+            return 0;
+        }
+        int backslash = lastEscapeStart(text, start);
+        if (backslash >= 0 && escapeEnd(text, backslash) > start) {
+            start = escapeEnd(text, backslash);
+        }
+        if (start < text.length() && Character.isLowSurrogate(text.charAt(start))
+                && Character.isHighSurrogate(text.charAt(start - 1))) {
+            start++;
+        }
+        return Math.min(start, text.length());
+    }
+
+    /**
+     * The start of the last escape that begins before {@code at}, or -1. Escapes
+     * are found by scanning from the start of the text, so an escaped backslash
+     * ({@code \\\\}) is never mistaken for the start of another escape.
+     */
+    private static int lastEscapeStart(String text, int at) {
+        int last = -1;
+        int scan = 0;
+        while (scan < at) {
+            if (text.charAt(scan) == '\\') {
+                last = scan;
+                scan = escapeEnd(text, scan);
+            } else {
+                scan++;
+            }
+        }
+        return last;
     }
 
     /** Cut at a code point (and so escape-sequence) boundary of the already escaped text. */
@@ -234,18 +393,7 @@ public final class ApprovalContent {
         if (text.length() <= PREVIEW_LIMIT) {
             return text;
         }
-        int end = PREVIEW_LIMIT;
-        if (Character.isLowSurrogate(text.charAt(end)) && Character.isHighSurrogate(text.charAt(end - 1))) {
-            end--;
-        }
-        // Never end inside an escape such as ​ or \U000e0041.
-        int backslash = text.lastIndexOf('\\', end - 1);
-        if (backslash >= 0 && backslash >= end - 10) {
-            int escapeEnd = escapeEnd(text, backslash);
-            if (escapeEnd > end) {
-                end = backslash;
-            }
-        }
+        int end = safeEnd(text, PREVIEW_LIMIT - TRUNCATED.length());
         return text.substring(0, end) + TRUNCATED;
     }
 

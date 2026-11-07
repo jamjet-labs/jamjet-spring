@@ -1,7 +1,7 @@
 package dev.jamjet.engram.spring;
 
 import org.junit.jupiter.api.Test;
-import org.springframework.ai.chat.client.ChatClientCustomizer;
+import org.springframework.ai.chat.client.ChatClientBuilderCustomizer;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
@@ -25,7 +25,7 @@ class EngramSpringAiConfigurationTest {
     void chatClientCustomizerIsRegisteredByDefault() {
         contextRunner.run(context -> {
             assertThat(context).hasBean("engramChatClientCustomizer");
-            assertThat(context).getBean("engramChatClientCustomizer", ChatClientCustomizer.class).isNotNull();
+            assertThat(context).getBean("engramChatClientCustomizer", ChatClientBuilderCustomizer.class).isNotNull();
         });
     }
 

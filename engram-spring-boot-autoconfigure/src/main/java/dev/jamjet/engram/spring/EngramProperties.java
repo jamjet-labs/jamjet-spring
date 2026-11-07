@@ -143,7 +143,7 @@ public class EngramProperties {
 
         /**
          * When {@code true} (default), Engram auto-registers a
-         * {@code ChatClientCustomizer} that attaches the
+         * {@code ChatClientBuilderCustomizer} that attaches the
          * {@link EngramContextAdvisor} to every ChatClient built via
          * Spring's default builder. Set to {@code false} to wire the
          * advisor manually.

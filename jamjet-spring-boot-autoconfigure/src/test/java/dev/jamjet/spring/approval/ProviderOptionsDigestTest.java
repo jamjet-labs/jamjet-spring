@@ -3,7 +3,6 @@ package dev.jamjet.spring.approval;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.prompt.ChatOptions;
-import org.springframework.ai.chat.prompt.DefaultChatOptions;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.tool.function.FunctionToolCallback;
@@ -17,34 +16,68 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ProviderOptionsDigestTest {
 
     /** Stands in for a provider's options class (OpenAI toolChoice, seed and so on). */
-    public static class ProviderOptions extends DefaultChatOptions {
-        private String toolChoice;
-        private Integer seed;
+    public static class ProviderOptions implements ChatOptions {
+        private final String model;
+        private final String toolChoice;
+        private final Integer seed;
+
+        ProviderOptions(String model, String toolChoice, Integer seed) {
+            this.model = model;
+            this.toolChoice = toolChoice;
+            this.seed = seed;
+        }
 
         public String getToolChoice() {
             return toolChoice;
-        }
-
-        public void setToolChoice(String toolChoice) {
-            this.toolChoice = toolChoice;
         }
 
         public Integer getSeed() {
             return seed;
         }
 
-        public void setSeed(Integer seed) {
-            this.seed = seed;
+        @Override
+        public String getModel() {
+            return model;
         }
 
         @Override
-        @SuppressWarnings("unchecked")
-        public <T extends ChatOptions> T copy() {
-            var c = new ProviderOptions();
-            c.setModel(getModel());
-            c.setToolChoice(toolChoice);
-            c.setSeed(seed);
-            return (T) c;
+        public Double getFrequencyPenalty() {
+            return null;
+        }
+
+        @Override
+        public Integer getMaxTokens() {
+            return null;
+        }
+
+        @Override
+        public Double getPresencePenalty() {
+            return null;
+        }
+
+        @Override
+        public java.util.List<String> getStopSequences() {
+            return null;
+        }
+
+        @Override
+        public Double getTemperature() {
+            return null;
+        }
+
+        @Override
+        public Integer getTopK() {
+            return null;
+        }
+
+        @Override
+        public Double getTopP() {
+            return null;
+        }
+
+        @Override
+        public ChatOptions.Builder<?> mutate() {
+            return ChatOptions.builder().model(model);
         }
     }
 
@@ -53,11 +86,7 @@ class ProviderOptionsDigestTest {
     }
 
     private static ProviderOptions provider(String toolChoice, Integer seed) {
-        var o = new ProviderOptions();
-        o.setModel("m");
-        o.setToolChoice(toolChoice);
-        o.setSeed(seed);
-        return o;
+        return new ProviderOptions("m", toolChoice, seed);
     }
 
     @Test
@@ -78,8 +107,9 @@ class ProviderOptionsDigestTest {
 
     @Test
     void theToolContextIsInTheDigest() {
-        var a = ToolCallingChatOptions.builder().toolNames("sendWire").toolContext(Map.of("account", "42")).build();
-        var b = ToolCallingChatOptions.builder().toolNames("sendWire").toolContext(Map.of("account", "666")).build();
+        var wire = ApprovalContentTest.tool("sendWire", "send money", "{}", false);
+        var a = ToolCallingChatOptions.builder().toolCallbacks(wire).toolContext(Map.of("account", "42")).build();
+        var b = ToolCallingChatOptions.builder().toolCallbacks(wire).toolContext(Map.of("account", "666")).build();
 
         assertThat(digest(a)).isNotEqualTo(digest(b));
     }

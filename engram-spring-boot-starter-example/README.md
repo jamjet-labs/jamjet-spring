@@ -93,7 +93,7 @@ Spring Boot auto-configures:
 |------|--------------|
 | `EngramClient` | HTTP client for the Engram REST API |
 | `EngramContextAdvisor` | Spring AI advisor that injects memory into prompts |
-| `ChatClientCustomizer` | Wires the advisor into every ChatClient |
+| `ChatClientBuilderCustomizer` | Wires the advisor into every ChatClient |
 | `EngramHealthIndicator` | Spring Boot Actuator health (if Actuator is on the classpath) |
 | `EngramChatMemoryRepository` | Off by default. `engram.spring-ai.chat-memory-repository: save-only` saves conversations to Engram and reads back an empty history; `on` also reads and deletes, which `jamjet-engram-server` 0.5.0 does not serve (reads throw `EngramServerMismatchException`) |
 

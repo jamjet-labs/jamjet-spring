@@ -18,6 +18,8 @@ public final class StubChatModel implements ChatModel {
     public volatile Prompt lastPrompt;
     private final String answer;
     private final RuntimeException failure;
+    private volatile org.springframework.ai.chat.prompt.ChatOptions options =
+            org.springframework.ai.chat.prompt.ChatOptions.builder().build();
 
     private StubChatModel(String answer, RuntimeException failure) {
         this.answer = answer;
@@ -30,6 +32,17 @@ public final class StubChatModel implements ChatModel {
 
     public static StubChatModel failingWith(RuntimeException failure) {
         return new StubChatModel(null, failure);
+    }
+
+    /** The default options the ChatClient starts every request from. */
+    public StubChatModel withOptions(org.springframework.ai.chat.prompt.ChatOptions options) {
+        this.options = options;
+        return this;
+    }
+
+    @Override
+    public org.springframework.ai.chat.prompt.ChatOptions getOptions() {
+        return options;
     }
 
     @Override

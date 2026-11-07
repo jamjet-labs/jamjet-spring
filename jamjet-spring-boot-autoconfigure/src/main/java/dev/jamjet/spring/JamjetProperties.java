@@ -260,6 +260,22 @@ public class JamjetProperties {
             this.allowUnknownInitiator = allowUnknownInitiator;
         }
 
+        /**
+         * How many later rounds of Spring AI's tool loop one decision covers. A
+         * round continues a decision only if it adds nothing but the model's tool
+         * calls and their results; after this many such rounds the next one is
+         * reviewed again. 0 reviews every round. Default 10.
+         */
+        private int maxContinuedRounds = 10;
+
+        public int getMaxContinuedRounds() {
+            return maxContinuedRounds;
+        }
+
+        public void setMaxContinuedRounds(int maxContinuedRounds) {
+            this.maxContinuedRounds = maxContinuedRounds;
+        }
+
         /** Accept a remember-me login as a reviewer. Off: a reviewer must have signed in this session. */
         private boolean allowRememberMe = false;
 

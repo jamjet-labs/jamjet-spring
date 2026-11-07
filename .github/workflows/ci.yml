@@ -4,6 +4,10 @@ on:
   push:
     branches: [main, "release/**"]
   pull_request:
+  schedule:
+    # Weekly, so a new Spring AI release candidate that breaks the build shows up
+    # even when nobody pushes.
+    - cron: "0 6 * * 1"
 
 permissions:
   contents: read
@@ -21,7 +25,9 @@ jobs:
       # released it from an ancestor tag v<version> and has not bumped yet),
       # versions disagree, or a README shows dev.jamjet coordinates nobody can
       # download. mvn deploy runs the same script without the flag.
-      - run: python3 scripts/check_release_version.py --allow-released-tag
+      # --allow-pending-release: on a -SNAPSHOT line, docs may show the release
+      # this line prepared (its last non-SNAPSHOT version) before it is published.
+      - run: python3 scripts/check_release_version.py --allow-released-tag --allow-pending-release
 
   build:
     name: Build and unit tests
@@ -48,3 +54,41 @@ jobs:
       # RuntimeContractIT starts jamjetdev/jamjet:<JamjetTestContainer.DEFAULT_TAG>
       # with Testcontainers and asserts what the runtime recorded.
       - run: mvn -B -Dgpg.skip -Dmaven.javadoc.skip=true -Pit -pl jamjet-spring-boot-starter-test -am verify
+
+  spring-ai-next:
+    name: Build and unit tests against the newest Spring AI 2.1
+    runs-on: ubuntu-latest
+    # Early warning only: a break in a Spring AI release candidate shows up here
+    # without turning the run red for changes that did not cause it.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - name: Resolve the newest Spring AI 2.1 and the Spring Boot it is built with
+        id: versions
+        run: |
+          ai=$(curl -fsSL https://repo1.maven.org/maven2/org/springframework/ai/spring-ai-bom/maven-metadata.xml \
+            | grep -o '<version>2\.1\.[^<]*</version>' | sed 's/<[^>]*>//g' | tail -1)
+          boot=$(curl -fsSL "https://repo1.maven.org/maven2/org/springframework/ai/spring-ai-autoconfigure-model-chat-client/$ai/spring-ai-autoconfigure-model-chat-client-$ai.pom" \
+            | grep -A1 '<artifactId>spring-boot-autoconfigure</artifactId>' | grep -o '<version>[^<]*' | sed 's/<version>//' | head -1)
+          # Fetched text: accept only plain version strings before using them.
+          pattern='^[0-9]+\.[0-9]+\.[0-9]+(-(M|RC)[0-9]+)?$'
+          if [[ ! "$ai" =~ $pattern || ! "$boot" =~ $pattern ]]; then
+            echo "unexpected versions: spring-ai='$ai' spring-boot='$boot'" >&2
+            exit 1
+          fi
+          echo "Spring AI $ai with Spring Boot $boot"
+          echo "spring-ai=$ai" >> "$GITHUB_OUTPUT"
+          echo "spring-boot=$boot" >> "$GITHUB_OUTPUT"
+      - env:
+          SPRING_AI_VERSION: ${{ steps.versions.outputs.spring-ai }}
+          SPRING_BOOT_VERSION: ${{ steps.versions.outputs.spring-boot }}
+        run: >-
+          mvn -B -Dgpg.skip -Dmaven.javadoc.skip=true
+          "-Dspring-ai.version=$SPRING_AI_VERSION"
+          "-Dspring-boot.version=$SPRING_BOOT_VERSION"
+          verify

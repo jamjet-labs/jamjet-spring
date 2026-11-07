@@ -4,7 +4,7 @@ import dev.jamjet.engram.EngramClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
-import org.springframework.ai.chat.client.ChatClientCustomizer;
+import org.springframework.ai.chat.client.ChatClientBuilderCustomizer;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.memory.ChatMemoryRepository;
 import org.springframework.beans.factory.ListableBeanFactory;
@@ -22,7 +22,7 @@ import org.springframework.context.annotation.Conditional;
  *
  * <p>Activates only when Spring AI's {@code ChatClient} is on the classpath.
  * Registers an {@link EngramContextAdvisor} bean and a
- * {@link ChatClientCustomizer} that wires the advisor into every ChatClient
+ * {@link ChatClientBuilderCustomizer} that wires the advisor into every ChatClient
  * the user constructs through the default builder.
  *
  * <p>Users who want manual control can set
@@ -48,7 +48,7 @@ public class EngramSpringAiConfiguration {
     @Bean
     @ConditionalOnProperty(prefix = "engram.spring-ai", name = "auto-wire",
                            havingValue = "true", matchIfMissing = true)
-    public ChatClientCustomizer engramChatClientCustomizer(
+    public ChatClientBuilderCustomizer engramChatClientCustomizer(
             EngramContextAdvisor advisor) {
         return builder -> builder.defaultAdvisors(advisor);
     }

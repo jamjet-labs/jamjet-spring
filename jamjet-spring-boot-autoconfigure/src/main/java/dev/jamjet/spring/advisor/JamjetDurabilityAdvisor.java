@@ -9,6 +9,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClientRequest;
 import org.springframework.ai.chat.client.ChatClientResponse;
+import org.springframework.ai.chat.client.advisor.ToolCallingAdvisor;
 import org.springframework.ai.chat.client.advisor.api.AdvisorChain;
 import org.springframework.ai.chat.client.advisor.api.BaseAdvisor;
 import org.springframework.ai.chat.client.advisor.api.CallAdvisorChain;
@@ -19,7 +20,6 @@ import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
-import org.springframework.core.Ordered;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -86,9 +86,17 @@ public class JamjetDurabilityAdvisor implements BaseAdvisor {
         return "JamjetDurabilityAdvisor";
     }
 
+    /**
+     * Order of this advisor: before Spring AI's {@code ToolCallingAdvisor} at its
+     * default order, so a call whose model asks for tools is one execution. The
+     * tool-calling advisor runs the rest of the chain once per model round; the
+     * audit and approval advisors run inside that loop and see every round.
+     */
+    public static final int ORDER = ToolCallingAdvisor.DEFAULT_ORDER - 50;
+
     @Override
     public int getOrder() {
-        return Ordered.LOWEST_PRECEDENCE - 100;
+        return ORDER;
     }
 
     @Override
@@ -101,6 +109,8 @@ public class JamjetDurabilityAdvisor implements BaseAdvisor {
         } catch (RuntimeException e) {
             recordModelFailure(executionId, e);
             throw e;
+        } finally {
+            closeApproval(advised);
         }
         recordOutcome(executionId, success(response));
         return response;
@@ -129,6 +139,7 @@ public class JamjetDurabilityAdvisor implements BaseAdvisor {
                     var chars = new AtomicLong();
                     var settled = new AtomicBoolean();
                     return chain.nextStream(advised)
+                            .doFinally(signal -> closeApproval(advised))
                             .doOnNext(r -> chars.addAndGet(textOf(r).length()))
                             .onErrorResume(err -> Mono.<ChatClientResponse>fromRunnable(() -> {
                                         if (settled.compareAndSet(false, true) && err instanceof RuntimeException re) {
@@ -330,6 +341,15 @@ public class JamjetDurabilityAdvisor implements BaseAdvisor {
         context.put(SESSION_ID_KEY, sessionId);
         context.put(EXECUTION_ID_KEY, executionId);
         context.put(WORKFLOW_ID_KEY, properties.getWorkflowId());
+        // Always a new one: whatever the caller put under this key is replaced.
+        context.put(ApprovedCall.KEY,
+                new ApprovedCall(executionId, properties.getApproval().getMaxContinuedRounds()));
         return request.mutate().context(context).build();
+    }
+
+    private static void closeApproval(ChatClientRequest advised) {
+        if (advised.context().get(ApprovedCall.KEY) instanceof ApprovedCall call) {
+            call.close();
+        }
     }
 }

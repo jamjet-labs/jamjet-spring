@@ -2,7 +2,7 @@ package dev.jamjet.spring;
 
 import dev.jamjet.spring.advisor.JamjetApprovalGuard;
 import org.springframework.ai.chat.client.ChatClient;
-import org.springframework.ai.chat.client.ChatClientCustomizer;
+import org.springframework.ai.chat.client.ChatClientBuilderCustomizer;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
@@ -24,7 +24,7 @@ public class JamjetApprovalGuardAutoConfiguration {
     }
 
     @Bean
-    public ChatClientCustomizer jamjetApprovalGuardCustomizer(JamjetApprovalGuard guard) {
+    public ChatClientBuilderCustomizer jamjetApprovalGuardCustomizer(JamjetApprovalGuard guard) {
         return builder -> builder.defaultAdvisors(guard);
     }
 }

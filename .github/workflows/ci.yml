@@ -59,12 +59,20 @@ jobs:
             | grep -o '<version>2\.1\.[^<]*</version>' | sed 's/<[^>]*>//g' | tail -1)
           boot=$(curl -fsSL "https://repo1.maven.org/maven2/org/springframework/ai/spring-ai-autoconfigure-model-chat-client/$ai/spring-ai-autoconfigure-model-chat-client-$ai.pom" \
             | grep -A1 '<artifactId>spring-boot-autoconfigure</artifactId>' | grep -o '<version>[^<]*' | sed 's/<version>//' | head -1)
-          test -n "$ai" && test -n "$boot"
+          # Fetched text: accept only plain version strings before using them.
+          pattern='^[0-9]+\.[0-9]+\.[0-9]+(-(M|RC)[0-9]+)?$'
+          if [[ ! "$ai" =~ $pattern || ! "$boot" =~ $pattern ]]; then
+            echo "unexpected versions: spring-ai='$ai' spring-boot='$boot'" >&2
+            exit 1
+          fi
           echo "Spring AI $ai with Spring Boot $boot"
           echo "spring-ai=$ai" >> "$GITHUB_OUTPUT"
           echo "spring-boot=$boot" >> "$GITHUB_OUTPUT"
-      - run: >-
+      - env:
+          SPRING_AI_VERSION: ${{ steps.versions.outputs.spring-ai }}
+          SPRING_BOOT_VERSION: ${{ steps.versions.outputs.spring-boot }}
+        run: >-
           mvn -B -Dgpg.skip -Dmaven.javadoc.skip=true
-          -Dspring-ai.version=${{ steps.versions.outputs.spring-ai }}
-          -Dspring-boot.version=${{ steps.versions.outputs.spring-boot }}
+          "-Dspring-ai.version=$SPRING_AI_VERSION"
+          "-Dspring-boot.version=$SPRING_BOOT_VERSION"
           verify

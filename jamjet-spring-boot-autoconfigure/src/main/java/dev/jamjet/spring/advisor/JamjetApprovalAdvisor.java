@@ -67,6 +67,9 @@ public class JamjetApprovalAdvisor implements BaseAdvisor {
     /** Correlation key of the event recording that a call is waiting for approval. */
     public static final String REQUESTED_EVENT = "spring_ai.approval_requested";
 
+    /** A tool-loop round that went to the model on an earlier decision. */
+    public static final String CONTINUED_EVENT = "spring_ai.approval_continued";
+
     private final JamjetRuntimeClient client;
     private final JamjetProperties properties;
     private final ApprovalWaitRegistry waitRegistry;
@@ -80,6 +83,10 @@ public class JamjetApprovalAdvisor implements BaseAdvisor {
         // Fail at startup on a bad timeout, not on the first call that needs approval.
         parseTimeout(properties.getApproval().getTimeout());
         checkDefaultDecision(properties.getApproval().getDefaultDecision());
+        if (properties.getApproval().getMaxContinuedRounds() < 0) {
+            throw new IllegalArgumentException("spring.jamjet.approval.max-continued-rounds must be 0 or more, was "
+                    + properties.getApproval().getMaxContinuedRounds());
+        }
     }
 
     /**
@@ -187,8 +194,19 @@ public class JamjetApprovalAdvisor implements BaseAdvisor {
             // A later round of Spring AI's tool loop: the approved request plus the
             // model's tool calls and their results. The tool calls themselves were
             // never reviewed, exactly as when Spring AI 1.0 ran them inside the model.
-            log.debug("Execution {}: tool-loop round continues the approved request", executionId);
-            approvedCall.approved(effective);
+            int round = approvedCall.continued(effective);
+            log.debug("Execution {}: tool-loop round {} continues the approved request", executionId, round);
+            try {
+                var payload = new LinkedHashMap<String, Object>();
+                payload.put("advisor", getName());
+                payload.put("round", round);
+                payload.put("max_continued_rounds", properties.getApproval().getMaxContinuedRounds());
+                payload.put("content_digest", ApprovalContent.digest(effective));
+                client.sendExternalEvent(executionId, CONTINUED_EVENT, payload);
+            } catch (JamjetClientException e) {
+                RuntimeErrors.handle(properties, log, "record a continued approval round for execution "
+                        + executionId, e);
+            }
             return request;
         }
 
@@ -213,7 +231,8 @@ public class JamjetApprovalAdvisor implements BaseAdvisor {
             // Who triggered the call, if Spring Security knows: that principal
             // cannot approve it (separation of duties, enforced by the controller).
             var context = new ApprovalWaitRegistry.WaitContext(initiator,
-                    ApprovalContent.preview(effective), ApprovalContent.digest(effective));
+                    ApprovalContent.preview(effective, approvedCall == null ? 0 : approvedCall.approvedMessageCount()),
+                    ApprovalContent.digest(effective));
             ApprovalDecision decision;
             try {
                 decision = waitRegistry.waitForApproval(executionId, timeout, context, decidingGrace(properties));

@@ -457,6 +457,62 @@ class JamjetApprovalAdvisorFlowTest {
         assertThat(dev.jamjet.spring.approval.ApprovalContent.digest(toolModel.prompts.get(0))).isEqualTo(reviewed);
     }
 
+    private java.util.List<com.fasterxml.jackson.databind.JsonNode> events(String kind) throws Exception {
+        var found = new java.util.ArrayList<com.fasterxml.jackson.databind.JsonNode>();
+        for (var r : runtime.requests()) {
+            if (r.path().equals(EVENTS)) {
+                var body = JSON.readTree(r.body());
+                if (body.get("correlation_key").asText().equals(kind)) {
+                    found.add(body);
+                }
+            }
+        }
+        return found;
+    }
+
+    /** A round that goes through on an earlier decision is recorded, with the digest of what the model got. */
+    @Test
+    void aContinuedRoundIsRecordedOnTheRuntime() throws Exception {
+        var toolModel = new ToolCallingModel();
+        var chatClient = recorded(toolModel);
+
+        var call = CompletableFuture.supplyAsync(() -> chatClient.prompt("wire 100")
+                .toolCallbacks(lookup(new java.util.concurrent.atomic.AtomicInteger()))
+                .advisors(a -> a.param(JamjetApprovalAdvisor.REQUIRES_APPROVAL_KEY, true))
+                .call().content());
+        awaitPendingDigestOtherThan(null);
+        registry.complete("exec_1", ApprovalDecision.approved("dave", null));
+        assertThat(call.get(5, TimeUnit.SECONDS)).isEqualTo("done");
+
+        var continued = events("spring_ai.approval_continued");
+        assertThat(continued).hasSize(1);
+        assertThat(continued.get(0).toString()).contains(
+                dev.jamjet.spring.approval.ApprovalContent.digest(toolModel.prompts.get(1)));
+    }
+
+    /** With max-continued-rounds 0 every round is reviewed, and the preview marks what is new. */
+    @Test
+    void withNoContinuedRoundsEveryRoundIsReviewed() throws Exception {
+        props.getApproval().setMaxContinuedRounds(0);
+        var toolModel = new ToolCallingModel();
+        var chatClient = recorded(toolModel);
+
+        var call = CompletableFuture.supplyAsync(() -> chatClient.prompt("wire 100")
+                .toolCallbacks(lookup(new java.util.concurrent.atomic.AtomicInteger()))
+                .advisors(a -> a.param(JamjetApprovalAdvisor.REQUIRES_APPROVAL_KEY, true))
+                .call().content());
+        String first = awaitPendingDigestOtherThan(null);
+        registry.complete("exec_1", ApprovalDecision.approved("dave", null));
+        awaitPendingDigestOtherThan(first);
+        assertThat(registry.context("exec_1").promptPreview())
+                .contains("[--- new since the last approval ---]", "[assistant tool call, already executed] lookup");
+        registry.complete("exec_1", ApprovalDecision.approved("dave", null));
+
+        assertThat(call.get(5, TimeUnit.SECONDS)).isEqualTo("done");
+        assertThat(approvalRequests()).isEqualTo(2);
+        assertThat(events("spring_ai.approval_continued")).isEmpty();
+    }
+
     /** A round that differs in anything but the tool calls and their results is reviewed again. */
     @Test
     void aRoundThatChangesMoreThanTheToolResultsNeedsItsOwnDecision() throws Exception {

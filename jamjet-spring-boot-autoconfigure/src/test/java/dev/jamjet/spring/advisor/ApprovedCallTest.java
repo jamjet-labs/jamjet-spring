@@ -65,6 +65,68 @@ class ApprovedCallTest {
                 ToolResponseMessage.builder().responses(new ArrayList<>()).build()))).as("empty tool results").isFalse();
     }
 
+    private static final AssistantMessage TWO_CALLS = AssistantMessage.builder().content("")
+            .toolCalls(List.of(new AssistantMessage.ToolCall("t1", "function", "lookup", "\"acct\""),
+                    new AssistantMessage.ToolCall("t2", "function", "balance", "\"acct\""))).build();
+
+    private static ToolResponseMessage resultsOf(ToolResponseMessage.ToolResponse... responses) {
+        return ToolResponseMessage.builder().responses(List.of(responses)).build();
+    }
+
+    private static ToolResponseMessage.ToolResponse result(String id, String name) {
+        return new ToolResponseMessage.ToolResponse(id, name, "42");
+    }
+
+    @Test
+    void exactlyOneResultPerToolCallInOneMessage() {
+        var call = new ApprovedCall("exec_1");
+        call.approved(prompt(OPTIONS, USER));
+        call.replied(new ChatResponse(List.of(new Generation(TWO_CALLS))));
+
+        assertThat(call.continues(prompt(OPTIONS, USER, TWO_CALLS,
+                resultsOf(result("t1", "lookup"), result("t2", "balance"))))).as("both, once").isTrue();
+        assertThat(call.continues(prompt(OPTIONS, USER, TWO_CALLS,
+                resultsOf(result("t1", "lookup"))))).as("one missing").isFalse();
+        assertThat(call.continues(prompt(OPTIONS, USER, TWO_CALLS,
+                resultsOf(result("t1", "lookup"), result("t1", "lookup"), result("t2", "balance")))))
+                .as("one twice").isFalse();
+        assertThat(call.continues(prompt(OPTIONS, USER, TWO_CALLS,
+                resultsOf(result("t1", "lookup"), result("t1", "lookup"))))).as("one twice, one missing").isFalse();
+        assertThat(call.continues(prompt(OPTIONS, USER, TWO_CALLS,
+                resultsOf(result("t1", "lookup")), resultsOf(result("t2", "balance"))))).as("two messages").isFalse();
+        assertThat(call.continues(prompt(OPTIONS, USER, TWO_CALLS,
+                resultsOf(result("t1", "sendWire"), result("t2", "balance"))))).as("wrong tool name").isFalse();
+    }
+
+    @Test
+    void continuedRoundsAreCappedPerDecision() {
+        var call = new ApprovedCall("exec_1", 1);
+        call.approved(prompt(OPTIONS, USER));
+        call.replied(new ChatResponse(List.of(new Generation(REPLY))));
+        var second = prompt(OPTIONS, USER, REPLY, results("t1", "42"));
+        assertThat(call.continues(second)).as("first continued round").isTrue();
+        call.continued(second);
+
+        var reply2 = AssistantMessage.builder().content("")
+                .toolCalls(List.of(new AssistantMessage.ToolCall("t2", "function", "lookup", "\"acct\""))).build();
+        call.replied(new ChatResponse(List.of(new Generation(reply2))));
+        var third = prompt(OPTIONS, USER, REPLY, results("t1", "42"), reply2, results("t2", "43"));
+        assertThat(call.continues(third)).as("over the cap: reviewed again").isFalse();
+
+        call.approved(third);
+        call.replied(new ChatResponse(List.of(new Generation(REPLY))));
+        assertThat(call.continues(prompt(OPTIONS, USER, REPLY, results("t1", "42"), reply2, results("t2", "43"),
+                REPLY, results("t1", "44")))).as("a new decision resets the count").isTrue();
+    }
+
+    @Test
+    void zeroContinuesNothing() {
+        var call = new ApprovedCall("exec_1", 0);
+        call.approved(prompt(OPTIONS, USER));
+        call.replied(new ChatResponse(List.of(new Generation(REPLY))));
+        assertThat(call.continues(prompt(OPTIONS, USER, REPLY, results("t1", "42")))).isFalse();
+    }
+
     @Test
     void aReplyWithoutToolCallsContinuesNothing() {
         var call = new ApprovedCall("exec_1");
@@ -79,7 +141,7 @@ class ApprovedCallTest {
         var call = approvedAndReplied();
         var second = prompt(OPTIONS, USER, REPLY, results("t1", "42"));
         assertThat(call.continues(second)).isTrue();
-        call.approved(second);
+        call.continued(second);
 
         assertThat(call.continues(second)).as("a round is continued once, after a new reply").isFalse();
     }

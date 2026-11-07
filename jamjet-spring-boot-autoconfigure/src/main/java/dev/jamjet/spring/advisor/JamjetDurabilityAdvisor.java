@@ -342,7 +342,8 @@ public class JamjetDurabilityAdvisor implements BaseAdvisor {
         context.put(EXECUTION_ID_KEY, executionId);
         context.put(WORKFLOW_ID_KEY, properties.getWorkflowId());
         // Always a new one: whatever the caller put under this key is replaced.
-        context.put(ApprovedCall.KEY, new ApprovedCall(executionId));
+        context.put(ApprovedCall.KEY,
+                new ApprovedCall(executionId, properties.getApproval().getMaxContinuedRounds()));
         return request.mutate().context(context).build();
     }
 

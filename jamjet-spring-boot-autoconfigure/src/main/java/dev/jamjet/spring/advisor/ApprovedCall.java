@@ -8,10 +8,10 @@ import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.prompt.Prompt;
 
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * The approval of one ChatClient call, shared by the rounds of Spring AI's tool
@@ -22,8 +22,9 @@ import java.util.Set;
  * ends. Advisors copy the context shallowly, so every round of the loop finds the
  * same instance. A later round goes through without a new decision only when it
  * is the approved request followed by the model's own reply to it (the tool calls
- * it asked for) and the results of those tool calls, with the same options. Any
- * other change needs a new decision.
+ * it asked for) and one message with exactly one result per tool call, with the
+ * same options, and at most {@code maxContinuedRounds} rounds in a row go through
+ * this way after a decision. Any other change needs a new decision.
  */
 final class ApprovedCall {
 
@@ -35,10 +36,23 @@ final class ApprovedCall {
     private List<String> approvedMessages;
     private String approvedOptions;
     private String reply;
-    private Set<String> replyToolCallIds = Set.of();
+    /** Tool call id to tool name, for the reply's tool calls. */
+    private Map<String, String> replyToolCalls = Map.of();
+    /** Rounds continued since the last real decision. */
+    private int continuedRounds;
+
+    private final int maxContinuedRounds;
 
     ApprovedCall(String executionId) {
+        this(executionId, Integer.MAX_VALUE);
+    }
+
+    ApprovedCall(String executionId, int maxContinuedRounds) {
+        if (maxContinuedRounds < 0) {
+            throw new IllegalArgumentException("max continued rounds must be 0 or more: " + maxContinuedRounds);
+        }
         this.executionId = executionId;
+        this.maxContinuedRounds = maxContinuedRounds;
     }
 
     /** The open approval of the call recorded as {@code executionId}, or null. */
@@ -52,28 +66,48 @@ final class ApprovedCall {
         return null;
     }
 
-    /** {@code effective} reached the model: approved, or continuing an approved request. */
+    /** A reviewer approved {@code effective}, and it reached the model. */
     synchronized void approved(Prompt effective) {
+        remember(effective);
+        continuedRounds = 0;
+    }
+
+    /** {@code effective} reached the model on an earlier decision ({@link #continues} was true). */
+    synchronized int continued(Prompt effective) {
+        remember(effective);
+        return ++continuedRounds;
+    }
+
+    /** How many messages the request that last reached the model had, or 0. */
+    synchronized int approvedMessageCount() {
+        return approvedMessages == null ? 0 : approvedMessages.size();
+    }
+
+    private void remember(Prompt effective) {
         approvedMessages = ApprovalContent.messageDigests(effective);
         approvedOptions = ApprovalContent.optionsDigest(effective);
         reply = null;
-        replyToolCallIds = Set.of();
+        replyToolCalls = Map.of();
     }
 
     /** The model answered the approved request. Only a reply asking for tools can be continued. */
     synchronized void replied(ChatResponse response) {
         reply = null;
-        replyToolCallIds = Set.of();
+        replyToolCalls = Map.of();
         if (response == null || approvedMessages == null) {
             return;
         }
         for (Generation generation : response.getResults()) {
             AssistantMessage output = generation.getOutput();
             if (output != null && output.hasToolCalls()) {
+                var calls = new HashMap<String, String>();
+                for (var call : output.getToolCalls()) {
+                    if (call.id() == null || calls.put(call.id(), call.name()) != null) {
+                        return; // no id, or the same id twice: results cannot be matched to calls
+                    }
+                }
                 reply = ApprovalContent.messageDigest(output);
-                var ids = new HashSet<String>();
-                output.getToolCalls().forEach(call -> ids.add(call.id()));
-                replyToolCallIds = ids;
+                replyToolCalls = Map.copyOf(calls);
                 return;
             }
         }
@@ -81,10 +115,12 @@ final class ApprovedCall {
 
     /**
      * True when {@code effective} is the approved request, then the model's reply
-     * to it, then only tool results for the tool calls in that reply.
+     * to it, then one tool-result message holding exactly one result per tool call
+     * in that reply (same id, same tool name), and fewer than the maximum rounds
+     * have continued since the last decision.
      */
     synchronized boolean continues(Prompt effective) {
-        if (closed || approvedMessages == null || reply == null) {
+        if (closed || approvedMessages == null || reply == null || continuedRounds >= maxContinuedRounds) {
             return false;
         }
         if (!ApprovalContent.optionsDigest(effective).equals(approvedOptions)) {
@@ -92,7 +128,7 @@ final class ApprovedCall {
         }
         List<Message> messages = effective.getInstructions();
         int n = approvedMessages.size();
-        if (messages.size() < n + 2) {
+        if (messages.size() != n + 2) {
             return false;
         }
         for (int i = 0; i < n; i++) {
@@ -103,14 +139,15 @@ final class ApprovedCall {
         if (!ApprovalContent.messageDigest(messages.get(n)).equals(reply)) {
             return false;
         }
-        for (Message m : messages.subList(n + 1, messages.size())) {
-            if (!(m instanceof ToolResponseMessage results) || results.getResponses().isEmpty()) {
+        if (!(messages.get(n + 1) instanceof ToolResponseMessage results)
+                || results.getResponses().size() != replyToolCalls.size()) {
+            return false;
+        }
+        var answered = new HashSet<String>();
+        for (var result : results.getResponses()) {
+            String name = replyToolCalls.get(result.id());
+            if (name == null || !name.equals(result.name()) || !answered.add(result.id())) {
                 return false;
-            }
-            for (var result : results.getResponses()) {
-                if (!replyToolCallIds.contains(result.id())) {
-                    return false;
-                }
             }
         }
         return true;

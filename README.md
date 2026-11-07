@@ -7,6 +7,8 @@
 
 Spring Boot starter for [JamJet](https://jamjet.dev). Add one dependency and every call through a `ChatClient` built from the auto-configured `ChatClient.Builder` is recorded on the JamJet runtime as an execution with an event log, with optional human approval before the model is called.
 
+> **Spring AI 2.0:** `main` (0.3.0, unreleased) targets Spring AI 2.0 and Spring Boot 4.1. The 0.2.x line stays on Spring AI 1.0 and Spring Boot 3.4. See [Spring AI 2.0](#spring-ai-20) for what changed.
+
 > **Upgrading from 0.1.0:** 0.1.0 called `/api/v1/...` routes the runtime never served. The runtime answered them with its web UI (`200 text/html`), the advisors logged a warning and carried on, and nothing was recorded. 0.2.0 calls the runtime's real routes and refuses calls it cannot record (see [When the runtime is unavailable](#when-the-runtime-is-unavailable)). LangChain4j chat memory is now keyed by a namespace (see [LangChain4j Integration](#langchain4j-integration-langchain4j-jamjet)), so memory written by a pre-release 0.2.0 build without one is not found and conversations start empty. Those executions stay on the runtime; read their `chat_memory` events with `GET /executions/{id}/events` if you need to carry history over.
 
 ## Quickstart
@@ -56,12 +58,12 @@ public class MyApp {
 
 ## What gets recorded
 
-The auto-configured `ChatClientCustomizer`s add these advisors to every `ChatClient` built from the auto-configured `ChatClient.Builder` bean. A client built another way (`ChatClient.create(model)`, `ChatClient.builder(model)`) gets none of them, so it is neither recorded nor gated; add the advisor beans to it yourself with `.defaultAdvisors(...)`.
+The auto-configured `ChatClientBuilderCustomizer`s add these advisors to every `ChatClient` built from the auto-configured `ChatClient.Builder` bean. A client built another way (`ChatClient.create(model)`, `ChatClient.builder(model)`) gets none of them, so it is neither recorded nor gated; add the advisor beans to it yourself with `.defaultAdvisors(...)`.
 
 | Advisor | What it does on the runtime |
 |---------|-----------------------------|
 | `JamjetDurabilityAdvisor` | Registers the `spring-ai-chat` workflow once (`POST /workflows`), starts one execution per call (`POST /executions`) before the model is called, and appends a `spring_ai.completed` event with the outcome (`completed` or `failed`). |
-| `JamjetAuditAdvisor` | Appends the prompt and the response as `spring_ai.prompt` and `spring_ai.response` events. Turn the text off with `spring.jamjet.audit.include-prompts=false` / `include-responses=false`. |
+| `JamjetAuditAdvisor` | Appends the prompt and the response of every model round as `spring_ai.prompt` and `spring_ai.response` events. Turn the text off with `spring.jamjet.audit.include-prompts=false` / `include-responses=false`. |
 | `JamjetApprovalAdvisor` | Opt in with `spring.jamjet.approval.enabled=true`. Pauses calls that ask for approval until a reviewer decides (see below). |
 
 Read a call's record back with `GET /executions/{id}/events`, or from Java:
@@ -69,6 +71,8 @@ Read a call's record back with `GET /executions/{id}/events`, or from Java:
 ```java
 List<ExecutionEvent> events = runtimeClient.listEvents(executionId);
 ```
+
+A call whose model asks for tools is still one execution. Spring AI 2.0 runs the tool loop in a `ToolCallingAdvisor` (order `HIGHEST_PRECEDENCE + 300`) that sends each model round through the rest of the advisor chain. The durability advisor is ordered before it (`JamjetDurabilityAdvisor.ORDER`, `HIGHEST_PRECEDENCE + 250`), so it starts one execution for the whole call. The audit advisor runs inside the loop and records every round; the approval advisor checks every round against the approved request (see [Human approval](#human-approval)). If you move the tool-calling advisor before the durability advisor, every round becomes its own execution.
 
 The model call runs in your JVM. The runtime holds the record: the workflow's single node is a `wait` on the `spring_ai.completed` event, which the advisor sends when the call ends. The runtime does not re-run or replay Spring AI calls.
 
@@ -130,9 +134,11 @@ curl -u reviewer:secret -X POST http://localhost:8080/jamjet/approvals/{executio
   -d '{"decision":"approved","content_digest":"<from /pending>","comment":"checked"}'
 ```
 
-**A decision is bound to the request that was reviewed.** `/pending` shows the request (one line per message with its role, plus media, tool calls, tool responses and the tools offered; invisible and reordering characters escaped; cut at 2000 characters with a `[truncated]` marker) and a `content_digest` over the request the ChatClient hands the model: every message's role and text, media (MIME type and a hash of the bytes, or the URL), tool calls, tool responses, every readable property of the options object (so provider-specific options such as a tool choice or a seed are covered), the tool names and definitions, and the tool context. Not covered, because an advisor cannot see them: default options and tools configured on the `ChatModel` itself (for example `spring.ai.openai.chat.options.*`), which the model merges inside its own call. Set options that matter for approval on the ChatClient or the request, not on the model. A decision must echo that digest: without it the answer is 400, with a different one 409, and nothing is recorded. The approval advisor is ordered `LOWEST_PRECEDENCE - 1`, the last advisor slot in Spring AI 1.0.x: an advisor with the same order runs before it (so its changes are reviewed), and one ordered `LOWEST_PRECEDENCE` sorts after Spring AI's own model-call advisor and never runs. After approval, Spring AI 1.0.x's model-call advisor appends the output-format instructions (from `.entity(...)`, or from a `spring.ai.chat.client.output.format` param) to the user message on the `.call()` path; the digest and preview already include that text. The `.stream()` path appends nothing.
+**A decision is bound to the request that was reviewed.** `/pending` shows the request (one line per message with its role, plus media, tool calls, tool responses and the tools offered; invisible and reordering characters escaped; cut at 2000 characters with a `[truncated]` marker) and a `content_digest` over the request the ChatClient hands the model: every message's role and text, media (MIME type and a hash of the bytes, or the URL), tool calls, tool responses, every readable property of the options object (so provider-specific options such as a tool choice or a seed are covered), the tool definitions (name, description, input schema, and whether the tool returns directly to the caller), and the tool context. Not covered, because an advisor cannot see them: default options and tools configured on the `ChatModel` itself (for example `spring.ai.openai.chat.options.*`), which the model merges inside its own call. Set options that matter for approval on the ChatClient or the request, not on the model. A decision must echo that digest: without it the answer is 400, with a different one 409, and nothing is recorded. The approval advisor is ordered `LOWEST_PRECEDENCE - 1`, the last slot before Spring AI's own model-call advisor; an advisor ordered `LOWEST_PRECEDENCE` sorts after the model-call advisor and never runs. Advisors with the same order run in reverse registration order, so another advisor at `LOWEST_PRECEDENCE - 1` can end up after the approval advisor. A call that needs approval is refused (`ApprovalRejectedException`, before anything is recorded or reviewed) when any advisor other than the model-call advisor would run after the approval advisor, because it could change the request after the review. Give advisors that change the prompt a lower order. After approval, Spring AI's model-call advisor changes the request once more on the `.call()` path: it appends the output-format instructions (from `.entity(...)`, or from a `spring.ai.chat.client.output.format` param) to the user message, or, with native structured output (`AdvisorParams.ENABLE_NATIVE_STRUCTURED_OUTPUT`) and options that take a schema, puts the JSON schema in the options instead. The digest and preview already include either change. The `.stream()` path changes nothing.
 
-**What an approval does not cover.** Spring AI runs the tool-calling loop inside the model call: after approval the model can call the offered tools, and those calls are not individually reviewed here. To gate the actions themselves, run them as runtime-governed tools with the runtime's own approval policy (`require_approval_for`), which holds each call until it is approved.
+**A call that uses tools needs one decision.** In Spring AI 2.0 the `ToolCallingAdvisor` runs the tool loop outside the approval advisor and sends every model round through it. On a call the durability advisor records, the first round is reviewed, and a later round goes through on that decision only when it is the approved request followed by the model's own reply asking for tools and the results of those tool calls, with the same options. Any other change, for example an advisor inside the loop rewriting the prompt on a later round, needs a new decision on the same execution. Without the durability advisor (an execution id you pass yourself) there is no per-call state, and every round needs its own decision. A streamed call that uses tools also needs a decision per round. The ToolCallingAdvisor's trimmed history (used when a memory advisor runs inside the loop) is not the approved request plus tool results, so it needs a decision per round as well.
+
+**What an approval does not cover.** The tool calls themselves, and their results. The `ToolCallingAdvisor` runs the tools the model asks for after the approved round and sends their results to the model without another review, as Spring AI 1.0 did inside the model call. To gate the actions themselves, run them as runtime-governed tools with the runtime's own approval policy (`require_approval_for`), which holds each call until it is approved, or use Spring AI 2.1's tool-call confirmation (see [Spring AI 2.0](#spring-ai-20)).
 
 Only one decision applies to a call: a second or late one gets 409 and records nothing.
 
@@ -159,6 +165,17 @@ For local development, `spring.jamjet.approval.controller.allow-unauthenticated=
 A decision is appended to the call's execution as a `spring_ai.approval_decision` event (approver, whether authenticated, the initiator when known, comment) before the call is released. If it cannot be recorded, the endpoint answers with the runtime's status (or 502) and message, and the waiting call is released as rejected. Only `"approved"` lets a call through. A call that times out is always rejected (`default-decision` is deprecated; any value other than `rejected` fails at startup). If a decision is recorded but the call stopped waiting before it could be delivered, the endpoint answers 409 and appends a `spring_ai.approval_decision_void` event, so the record never claims a decision that did not apply.
 
 On a `ChatClient` built from the auto-configured `ChatClient.Builder`, a call marked as requiring approval never runs ungated: `JamjetApprovalGuard` is auto-configured on its own, independently of `durability-enabled` and `approval.enabled`, and refuses the call before the model runs when no approval advisor is on the client. A client built any other way (`ChatClient.create(model)`, `ChatClient.builder(model)`, your own `ChatClient.Builder` bean, or with `spring.ai.chat.client.enabled=false`) gets no guard, and the marker does nothing there; add `JamjetApprovalGuard` and `JamjetApprovalAdvisor` to it yourself. A call whose execution could not be started (the runtime failed open) is rejected by the approval advisor.
+
+## Spring AI 2.0
+
+What changed for this starter between Spring AI 1.0 and 2.0:
+
+- Tools are executed by a `ToolCallingAdvisor` in the ChatClient's advisor chain, not inside the model call. The durability advisor is ordered before it, so a call stays one execution with one approval; see [What gets recorded](#what-gets-recorded) and [Human approval](#human-approval).
+- The ChatClient resolves every tool to a callback before the advisors run, and the per-request tool names and internal tool execution flag are gone from the options. The approval digest covers the tool callbacks' definitions, their return-direct flag and the tool context.
+- The advisors are added through a `ChatClientBuilderCustomizer` (`ChatClientCustomizer` is deprecated for removal).
+- The Engram health indicator uses Spring Boot 4's `spring-boot-health` module.
+
+**Spring AI 2.1 tool-call confirmation and JamJet approval.** Spring AI 2.1 (in release candidates) adds `@Tool(requiresConfirmation = true)`, `spring.ai.tools.confirmation.tools` and `ToolCallConfirmationPolicy` beans. When a tool call needs confirmation, the tool-calling loop does not run it: it returns the model's reply to the caller with the keys of the waiting calls (`ToolCallDecisions.awaitingDecision(response)`) and keeps nothing. The application resumes by running the calls with `ToolCallingManager.executeToolCalls(prompt, reply, decisions)` and sending the conversation back. That pause is stateless: where the decision comes from, who made it, how long it may wait and whether the reply was changed in the meantime are left to the application. This starter does not hook into it yet. The JamJet side of that pairing is to record the waiting calls on the execution, hold the decision on the runtime with the reviewer's identity and a digest of the exact calls, and refuse a resume whose calls do not match that digest.
 
 ## Configuration
 
@@ -195,8 +212,8 @@ On a `ChatClient` built from the auto-configured `ChatClient.Builder`, a call ma
 ## Requirements
 
 - Java 21+
-- Spring Boot 3.4+
-- Spring AI 1.0+
+- Spring Boot 4.1+ (the 0.2.x line: Spring Boot 3.4+)
+- Spring AI 2.0+ (the 0.2.x line: Spring AI 1.0)
 - JamJet runtime 0.5.0+ (Docker image `jamjetdev/jamjet` or the `jamjet-server` binary)
 
 ## Testing (`jamjet-spring-boot-starter-test`)

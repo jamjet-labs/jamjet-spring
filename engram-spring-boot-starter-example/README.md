@@ -16,11 +16,12 @@ The whole "memory" of the bot is one annotation: `@SpringBootApplication`. The E
 
 ## Prerequisites
 
-1. **An Engram server running** in REST mode:
+1. **The Rust Engram server running** in REST mode:
    ```bash
    cargo install jamjet-engram-server
    engram serve --mode rest --port 9090 --db ~/.engram/example.db
    ```
+   The Python Engram server (`jamjet-engram`) serves different routes and is not supported; the app refuses to start against it.
 
 2. **An OpenAI API key:**
    ```bash
@@ -82,7 +83,7 @@ When you add the dependency:
 <dependency>
     <groupId>dev.jamjet</groupId>
     <artifactId>engram-spring-boot-starter</artifactId>
-    <version>0.1.1</version>
+    <version>0.2.1</version>
 </dependency>
 ```
 
@@ -94,6 +95,7 @@ Spring Boot auto-configures:
 | `EngramContextAdvisor` | Spring AI advisor that injects memory into prompts |
 | `ChatClientCustomizer` | Wires the advisor into every ChatClient |
 | `EngramHealthIndicator` | Spring Boot Actuator health (if Actuator is on the classpath) |
+| `EngramChatMemoryRepository` | Off by default. `engram.spring-ai.chat-memory-repository: save-only` saves conversations to Engram and reads back an empty history; `on` also reads and deletes, which `jamjet-engram-server` 0.5.0 does not serve (reads throw `EngramServerMismatchException`) |
 
 You can disable any of them via `application.yml`:
 
@@ -112,8 +114,9 @@ engram:
 engram:
   enabled: true                              # default true
   base-url: http://localhost:9090            # Engram REST server URL
-  api-token: ${ENGRAM_TOKEN:}                # optional Bearer token
+  api-token: ${ENGRAM_AUTH_TOKEN:}           # optional Bearer token (ENGRAM_AUTH_TOKEN is also read directly)
   timeout-seconds: 30                        # HTTP timeout
+  verify-on-startup: true                    # refuse to start against a server that is not the Rust engram-server
   default-user-id: alice                     # used when chat requests don't pass a user ID
   default-org-id: default                    # multi-tenant scope
   health:

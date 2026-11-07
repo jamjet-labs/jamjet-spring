@@ -12,7 +12,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * engram:
  *   enabled: true
  *   base-url: http://localhost:9090
- *   api-token: ${ENGRAM_TOKEN:}
+ *   api-token: ${ENGRAM_AUTH_TOKEN:}
  *   timeout-seconds: 30
  *   default-user-id: alice
  * }</pre>
@@ -26,16 +26,27 @@ public class EngramProperties {
     private boolean enabled = true;
 
     /**
-     * Base URL of the Engram REST server. Default: {@code http://localhost:9090}.
-     * Run the server via {@code engram serve --mode rest --port 9090}.
+     * Base URL of the Rust Engram REST server (jamjet-engram-server). Default:
+     * {@code http://localhost:9090}. Run the server via
+     * {@code engram serve --mode rest --port 9090}. The Python Engram server
+     * serves different routes and is not supported.
      */
     private String baseUrl = "http://localhost:9090";
 
     /**
-     * Optional API token for authenticated Engram servers. Falls back to
-     * the {@code ENGRAM_TOKEN} environment variable when unset.
+     * Bearer token for an Engram server started with a token. When unset or
+     * blank, the {@code ENGRAM_AUTH_TOKEN} environment variable is used (the
+     * name Engram uses for its server token), then the deprecated
+     * {@code ENGRAM_TOKEN}, which logs a warning.
      */
     private String apiToken;
+
+    /**
+     * Check at startup that {@code base-url} answers like the Rust
+     * engram-server ({@code GET /health}). A different server fails startup;
+     * an unreachable one only logs a warning. Default: {@code true}.
+     */
+    private boolean verifyOnStartup = true;
 
     /**
      * HTTP request timeout in seconds. Default: {@code 30}.
@@ -86,6 +97,14 @@ public class EngramProperties {
 
     public void setApiToken(String apiToken) {
         this.apiToken = apiToken;
+    }
+
+    public boolean isVerifyOnStartup() {
+        return verifyOnStartup;
+    }
+
+    public void setVerifyOnStartup(boolean verifyOnStartup) {
+        this.verifyOnStartup = verifyOnStartup;
     }
 
     public int getTimeoutSeconds() {
@@ -140,20 +159,33 @@ public class EngramProperties {
         }
 
         /**
-         * When {@code true} (default), Engram auto-registers a
-         * {@link EngramChatMemoryRepository} as the
-         * {@link org.springframework.ai.chat.memory.ChatMemoryRepository} bean.
-         * Set to {@code false} to provide your own implementation.
+         * Whether Engram registers an {@link EngramChatMemoryRepository} as the
+         * {@link org.springframework.ai.chat.memory.ChatMemoryRepository} bean:
+         * {@code off} (default), {@code save-only} (saves go to Engram, reads
+         * return an empty history and deletes do nothing, with one warning), or
+         * {@code on}. {@code true} and {@code false} mean {@code on} and
+         * {@code off}. jamjet-engram-server 0.5.0 does not serve the routes
+         * the repository reads and deletes with, so {@code on} fails there.
          */
-        private boolean chatMemoryRepository = true;
+        private ChatMemoryRepositoryMode chatMemoryRepository = ChatMemoryRepositoryMode.OFF;
 
-        public boolean isChatMemoryRepository() {
+        public ChatMemoryRepositoryMode getChatMemoryRepository() {
             return chatMemoryRepository;
         }
 
-        public void setChatMemoryRepository(boolean chatMemoryRepository) {
+        public void setChatMemoryRepository(ChatMemoryRepositoryMode chatMemoryRepository) {
             this.chatMemoryRepository = chatMemoryRepository;
         }
+    }
+
+    /** Values of {@code engram.spring-ai.chat-memory-repository}. */
+    public enum ChatMemoryRepositoryMode {
+        /** No Engram repository (default). {@code false} binds to this. */
+        OFF,
+        /** Saves go to Engram; reads return an empty history; deletes do nothing. */
+        SAVE_ONLY,
+        /** Saves, reads and deletes go to Engram. {@code true} binds to this. */
+        ON
     }
 
     public static class Health {

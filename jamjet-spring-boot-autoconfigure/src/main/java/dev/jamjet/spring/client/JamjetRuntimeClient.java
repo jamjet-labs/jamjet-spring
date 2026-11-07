@@ -53,7 +53,7 @@ import java.util.concurrent.Executors;
 public class JamjetRuntimeClient implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(JamjetRuntimeClient.class);
-    private static final String USER_AGENT = "jamjet-spring-boot-starter/0.2.0";
+    private static final String USER_AGENT = "jamjet-spring-boot-starter/0.2.1";
 
     private final JamjetProperties properties;
     private final HttpClient httpClient;

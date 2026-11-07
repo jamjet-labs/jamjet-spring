@@ -44,8 +44,11 @@ import java.util.Map;
  * {@code EngramProperties#getDefaultUserId()}. If neither is set, no memory
  * context is injected and the call proceeds normally.
  *
- * <p>Memory failures are logged but do not break the LLM call — the advisor
- * degrades gracefully.
+ * <p>Memory outages (a server error, a connection failure) are logged and the
+ * call proceeds without memory. A server that does not serve
+ * {@code POST /v1/memory/context} (HTTP 404 or 405, for example the Python
+ * Engram server) is a deployment mistake, so the advisor throws
+ * {@link EngramServerMismatchException} instead of hiding it.
  */
 public class EngramContextAdvisor implements BaseAdvisor {
 
@@ -102,6 +105,7 @@ public class EngramContextAdvisor implements BaseAdvisor {
             return request;
         }
 
+        boolean interruptedBefore = Thread.currentThread().isInterrupted();
         try {
             Map<String, Object> context = client.context(
                     query, userId, orgId, tokenBudget, "system_prompt");
@@ -118,7 +122,9 @@ public class EngramContextAdvisor implements BaseAdvisor {
             return injectMemoryMessage(request, memoryText);
 
         } catch (Exception e) {
-            log.warn("Engram context lookup failed, proceeding without memory: {}", e.getMessage());
+            EngramSdkInterrupts.undo(e, interruptedBefore);
+            EngramRoutes.throwIfNotServed(e, EngramRoutes.CONTEXT, properties.getBaseUrl());
+            log.warn("Engram context lookup failed, proceeding without memory: {}", EngramErrors.safeMessage(e));
             return request;
         }
     }

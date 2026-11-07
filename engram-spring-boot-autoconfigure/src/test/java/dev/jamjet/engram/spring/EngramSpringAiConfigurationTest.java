@@ -40,6 +40,24 @@ class EngramSpringAiConfigurationTest {
     }
 
     @Test
+    void chatMemoryRepositoryIsOffByDefault() {
+        // jamjet-engram-server 0.5.0 cannot serve its reads, so registering it
+        // by default made every chat memory read fail.
+        contextRunner.run(context -> {
+            assertThat(context).doesNotHaveBean(EngramChatMemoryRepository.class);
+        });
+    }
+
+    @Test
+    void chatMemoryRepositoryCanBeTurnedOn() {
+        contextRunner
+                .withPropertyValues("engram.spring-ai.chat-memory-repository=true")
+                .run(context -> {
+                    assertThat(context).hasSingleBean(EngramChatMemoryRepository.class);
+                });
+    }
+
+    @Test
     void noAdvisorWhenEngramDisabled() {
         contextRunner
                 .withPropertyValues("engram.enabled=false")

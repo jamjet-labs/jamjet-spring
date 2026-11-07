@@ -48,6 +48,16 @@ class EngramServerCheckTest {
     }
 
     @Test
+    void thePythonServerNeverGetsTheToken() throws Exception {
+        try (var server = StubEngramServer.python()) {
+            runner.withPropertyValues("engram.base-url=" + server.baseUrl(), "ENGRAM_AUTH_TOKEN=s3cret")
+                    .run(context -> assertThat(context).hasFailed());
+            assertThat(server.seen()).isNotEmpty()
+                    .extracting(StubEngramServer.Seen::authorization).containsOnlyNulls();
+        }
+    }
+
+    @Test
     void refusesToStartAgainstSomethingThatIsNotEngram() throws Exception {
         try (var server = StubEngramServer.empty()) {
             runner.withPropertyValues("engram.base-url=" + server.baseUrl()).run(context -> {

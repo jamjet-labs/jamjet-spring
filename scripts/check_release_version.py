@@ -20,7 +20,12 @@ Checks, from the repository root:
 Exit 0 when all pass, 1 when a check fails, 2 when Central could not be
 asked (the check never passes on a network error).
 
-Usage: python3 scripts/check_release_version.py [--root DIR] [--central URL]
+--allow-released-tag (CI only): a version already on Central passes check 2
+when the tag v<version> exists and is an ancestor of HEAD, i.e. this branch is
+the line that released it and has not bumped yet. Without the flag (the
+deploy-phase run in the parent POM) a released version always fails.
+
+Usage: python3 scripts/check_release_version.py [--root DIR] [--central URL] [--allow-released-tag]
 """
 
 from __future__ import annotations
@@ -127,10 +132,25 @@ def doc_coordinates(path: Path) -> list[tuple[int, str, str]]:
     return found
 
 
+def released_from_this_line(root: Path, version: str) -> bool:
+    """True if tag v<version> exists and is an ancestor of HEAD."""
+    tag = f"v{version}"
+    try:
+        subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}"],
+                       cwd=root, check=True, capture_output=True)
+        subprocess.run(["git", "merge-base", "--is-ancestor", tag, "HEAD"],
+                       cwd=root, check=True, capture_output=True)
+        return True
+    except (OSError, subprocess.CalledProcessError):
+        return False
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--central", default=DEFAULT_CENTRAL)
+    parser.add_argument("--allow-released-tag", action="store_true",
+                        help="CI only: accept a version released from an ancestor tag v<version>")
     args = parser.parse_args()
     root = args.root.resolve()
 
@@ -151,8 +171,13 @@ def main() -> int:
         if snapshot:
             print(f"{version} is a snapshot: Central release check skipped")
         else:
+            released_here = args.allow_released_tag and released_from_this_line(root, version)
             for artifact in deployable:
                 if on_central(args.central, artifact, version):
+                    if released_here:
+                        print(f"{GROUP}:{artifact}:{version} is on Central, released from tag v{version} "
+                              f"on this line; bump the version before the next release")
+                        continue
                     problems.append(
                         f"{GROUP}:{artifact}:{version} is already on Maven Central; "
                         f"pick a version no module has released"

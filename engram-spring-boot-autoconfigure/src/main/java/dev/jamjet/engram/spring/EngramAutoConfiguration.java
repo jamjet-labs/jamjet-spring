@@ -95,16 +95,29 @@ public class EngramAutoConfiguration {
         return new EngramClient(config);
     }
 
-    private static boolean sendsInTheClear(String baseUrl) {
-        try {
-            java.net.URI uri = java.net.URI.create(baseUrl);
-            if (!"http".equalsIgnoreCase(uri.getScheme()) || uri.getHost() == null) {
-                return false;
-            }
-            String host = uri.getHost();
-            return !(host.equalsIgnoreCase("localhost") || host.startsWith("127.") || host.equals("[::1]"));
-        } catch (IllegalArgumentException e) {
+    private static final java.util.regex.Pattern IPV4_LOOPBACK =
+            java.util.regex.Pattern.compile("127(\\.(25[0-5]|2[0-4]\\d|1?\\d?\\d)){3}");
+
+    /** True for {@code http://} to anything but localhost, 127.0.0.0/8 or [::1]. */
+    static boolean sendsInTheClear(String baseUrl) {
+        int schemeEnd = baseUrl.indexOf("://");
+        if (schemeEnd < 0 || !baseUrl.substring(0, schemeEnd).equalsIgnoreCase("http")) {
             return false;
         }
+        // Read the authority by hand: URI.getHost() is null for names with "_".
+        String authority = baseUrl.substring(schemeEnd + 3).split("[/?#]", 2)[0];
+        authority = authority.substring(authority.lastIndexOf('@') + 1);
+        String host;
+        if (authority.startsWith("[")) {
+            int close = authority.indexOf(']');
+            host = close < 0 ? authority : authority.substring(0, close + 1);
+        } else {
+            int colon = authority.lastIndexOf(':');
+            host = colon < 0 ? authority : authority.substring(0, colon);
+        }
+        boolean loopback = host.equalsIgnoreCase("localhost")
+                || IPV4_LOOPBACK.matcher(host).matches()
+                || host.equals("[::1]");
+        return !loopback;
     }
 }

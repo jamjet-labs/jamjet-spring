@@ -38,7 +38,7 @@ public class EngramHealthIndicator implements HealthIndicator {
         } catch (Exception e) {
             EngramSdkInterrupts.undo(e, interruptedBefore);
             return Health.down()
-                    .withDetail("error", e.getMessage())
+                    .withDetail("error", String.valueOf(EngramErrors.safeMessage(e)))
                     .withDetail("exception", e.getClass().getSimpleName())
                     .build();
         }

@@ -332,13 +332,21 @@ The starter talks to the **Rust Engram server** (`jamjet-engram-server` 0.5.x on
 engram.base-url=http://localhost:9090
 ```
 
-**Token.** The client sends `Authorization: Bearer <token>` taken from `engram.api-token` (which Spring also binds from `ENGRAM_API_TOKEN`), else the `ENGRAM_AUTH_TOKEN` environment variable (the name Engram uses for its server token), else `ENGRAM_TOKEN`, which still works but is deprecated and logs a warning. The value is trimmed, and a token with a control character in it stops startup without being printed. `jamjet-engram-server` 0.5.0 does not check a token itself, so keep it on a private network or behind a proxy that does. The starter logs a warning when it would send a token over plain `http://` to a host other than localhost.
+**Token.** The client sends `Authorization: Bearer <token>` taken from `engram.api-token` (which Spring also binds from `ENGRAM_API_TOKEN`), else the `ENGRAM_AUTH_TOKEN` environment variable (the name Engram uses for its server token), else `ENGRAM_TOKEN`, which still works but is deprecated and logs a warning. The value is trimmed and must be visible ASCII (`!` to `~`, what a bearer token is made of); anything else, such as a pasted zero-width space, stops startup without the value being printed. `jamjet-engram-server` 0.5.0 does not check a token itself, so keep it on a private network or behind a proxy that does. The starter logs a warning when it would send a token over plain `http://` to a host other than localhost.
 
-**Startup check.** On startup the starter calls `GET /health` once and expects the Rust server's answer. Against the Python server, another service, a redirect, or a server that rejects the token, the application fails to start with `EngramServerMismatchException`, which says what it found. A server that is unreachable, answers 5xx or rate-limits only logs a warning. Turn the check off with `engram.verify-on-startup=false`.
+**Startup check.** On startup the starter calls `GET /health` without the token and expects the Rust server's answer; it sends the token only if `/health` answers 401, 403 or 407, so a server that turns out not to be Engram never receives it from the check. Against the Python server, another service, a redirect, or a server that rejects the token, the application fails to start with `EngramServerMismatchException`, which says what it found. A server that is unreachable, answers 5xx or rate-limits only logs a warning. Turn the check off with `engram.verify-on-startup=false`.
 
 **Wrong routes fail loudly.** If a route answers 404 or 405 at runtime, `EngramContextAdvisor` and `EngramChatMemoryRepository` throw `EngramServerMismatchException` naming the route. A server error or a connection failure is still logged, and the call goes on without memory.
 
-**Chat memory repository (off by default).** `EngramChatMemoryRepository` reads and deletes a conversation with `GET` and `DELETE /v1/memory/messages/{conversation_id}`. `jamjet-engram-server` 0.5.0 does not match those routes for any conversation id, so earlier versions returned an empty history without saying so. It is now registered only with `engram.spring-ai.chat-memory-repository=true`, and on 0.5.0 its reads throw `EngramServerMismatchException`. Turn it on once a fixed server is released. The context advisor (`POST /v1/memory/context`) is not affected.
+**Chat memory repository.** `EngramChatMemoryRepository` saves a conversation with `POST /v1/memory/messages` and reads and deletes it with `GET` and `DELETE /v1/memory/messages/{conversation_id}`. `jamjet-engram-server` 0.5.0 does not match the read and delete routes for any conversation id, so 0.2.0 saved conversations but always read back an empty history without saying so. `engram.spring-ai.chat-memory-repository` now has three values:
+
+| Value | What happens |
+|-------|--------------|
+| `off` (default, also `false`) | No Engram repository. If the application has a Spring AI `ChatMemory`, a warning at startup says conversations are not saved to Engram. |
+| `save-only` | Saves go to Engram (as in 0.2.0, including fact extraction if the server runs with `--extract-on-save`). Reads return an empty history and deletes do nothing, with one warning. |
+| `on` (also `true`) | Saves, reads and deletes go to Engram. On 0.5.0 reads throw `EngramServerMismatchException`. |
+
+The context advisor (`POST /v1/memory/context`) is not affected.
 
 ## Building
 
@@ -348,6 +356,8 @@ mvn -Dgpg.skip -Pit verify       # plus RuntimeContractIT against a real runtime
 JAMJET_IT_RUNTIME_URL=http://localhost:7700 mvn -Dgpg.skip -Pit verify   # use a runtime you started (dev mode)
 python3 scripts/check_release_version.py   # fails if any module's version is already on Maven Central
 ```
+
+`mvn deploy` runs that check in the parent POM before anything is uploaded. Release with a plain full-reactor `mvn deploy`: `-pl`, `-rf` and `-Dexec.skip` all skip the check.
 
 ## License
 

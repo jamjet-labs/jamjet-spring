@@ -33,6 +33,15 @@ class EngramSdkInterruptsTest {
     }
 
     @Test
+    void keepsAnInterruptWhenTheErrorIsNotAnSdkIoError() {
+        // Only the SDK's "HTTP error for" wrapper around an IOException comes with
+        // an interrupt the SDK set itself.
+        Thread.currentThread().interrupt();
+        EngramSdkInterrupts.undo(new RuntimeException("Engram API error: HTTP 500 for /x: {}"), false);
+        assertThat(Thread.currentThread().isInterrupted()).isTrue();
+    }
+
+    @Test
     void keepsAnInterruptThatHappenedDuringTheCall() {
         Thread.currentThread().interrupt();
         EngramSdkInterrupts.undo(sdkError(new InterruptedException()), false);

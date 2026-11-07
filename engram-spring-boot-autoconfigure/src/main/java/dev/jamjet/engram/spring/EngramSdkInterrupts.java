@@ -12,18 +12,19 @@ final class EngramSdkInterrupts {
     private EngramSdkInterrupts() {}
 
     /**
-     * Clears the interrupt flag if the thread was not interrupted before the
-     * call and {@code error} is not about an interrupt.
+     * Clears the interrupt flag only when the thread was not interrupted
+     * before the call and {@code error} is the SDK's wrapper around an
+     * {@link java.io.IOException} ({@code "HTTP error for <path>"}), the one
+     * path where the SDK interrupts the thread itself.
      */
     static void undo(Throwable error, boolean interruptedBeforeCall) {
-        if (interruptedBeforeCall) {
+        if (interruptedBeforeCall || error == null) {
             return;
         }
-        for (Throwable t = error; t != null; t = t.getCause()) {
-            if (t instanceof InterruptedException) {
-                return;
-            }
+        String message = error.getMessage();
+        if (message != null && message.startsWith("HTTP error for ")
+                && error.getCause() instanceof java.io.IOException) {
+            Thread.interrupted();
         }
-        Thread.interrupted();
     }
 }

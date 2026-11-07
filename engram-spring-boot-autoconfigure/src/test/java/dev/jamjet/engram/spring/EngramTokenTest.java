@@ -90,14 +90,67 @@ class EngramTokenTest {
     }
 
     @Test
-    void theStartupCheckSendsTheTokenToo() {
+    void theStartupCheckDoesNotSendTheTokenToAServerItHasNotIdentified() {
         runner.withPropertyValues("ENGRAM_AUTH_TOKEN=s3cret").run(context -> {
             assertThat(context).hasNotFailed();
             assertThat(server.seen()).first().satisfies(first -> {
                 assertThat(first.path()).isEqualTo("/health");
-                assertThat(first.authorization()).isEqualTo("Bearer s3cret");
+                assertThat(first.authorization()).isNull();
             });
         });
+    }
+
+    @Test
+    void theStartupCheckSendsTheTokenWhenHealthDemandsIt() {
+        server.requireToken("GET", "/health", "s3cret");
+        runner.withPropertyValues("ENGRAM_AUTH_TOKEN=s3cret").run(context -> {
+            assertThat(context).hasNotFailed();
+            assertThat(server.seen()).extracting(StubEngramServer.Seen::authorization)
+                    .startsWith(null, "Bearer s3cret");
+        });
+    }
+
+    @Test
+    void aTokenWithACharacterOutsideVisibleAsciiFailsWithoutPrintingIt(CapturedOutput output) {
+        // A zero-width space pasted with the token: the JDK refuses it in a header
+        // and its error message prints the whole header value.
+        withRawEnvironment("ENGRAM_AUTH_TOKEN", "tok-SECRET\u200B").run(context -> {
+            assertThat(context).hasFailed();
+            assertThat(context.getStartupFailure()).rootCause()
+                    .hasMessageContaining("ENGRAM_AUTH_TOKEN")
+                    .hasMessageNotContaining("tok-SECRET");
+        });
+        assertThat(output).doesNotContain("tok-SECRET");
+    }
+
+    @Test
+    void aTokenWithASpaceInsideIsRefused() {
+        withRawEnvironment("ENGRAM_AUTH_TOKEN", "tok SECRET").run(context -> assertThat(context).hasFailed());
+    }
+
+    @Test
+    void warnsForAHostNameWithAnUnderscore(CapturedOutput output) {
+        plainHttpRunner("http://engram_host:9090").run(context -> assertThat(context).hasNotFailed());
+        assertThat(output).contains("plain HTTP");
+    }
+
+    @Test
+    void warnsForADnsNameThatStartsWith127(CapturedOutput output) {
+        plainHttpRunner("http://127.example.invalid:9090").run(context -> assertThat(context).hasNotFailed());
+        assertThat(output).contains("plain HTTP");
+    }
+
+    @Test
+    void noPlainHttpWarningForLocalhost(CapturedOutput output) {
+        plainHttpRunner("http://localhost:9090").run(context -> assertThat(context).hasNotFailed());
+        assertThat(output).doesNotContain("plain HTTP");
+    }
+
+    private static ApplicationContextRunner plainHttpRunner(String baseUrl) {
+        return new ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(EngramAutoConfiguration.class))
+                .withPropertyValues("engram.base-url=" + baseUrl,
+                        "engram.verify-on-startup=false", "ENGRAM_AUTH_TOKEN=s3cret");
     }
 
     /** {@code withPropertyValues} trims values, so raw ones go in as a property source. */

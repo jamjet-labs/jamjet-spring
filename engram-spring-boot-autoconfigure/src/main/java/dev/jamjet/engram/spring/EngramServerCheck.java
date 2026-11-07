@@ -15,7 +15,8 @@ import java.time.Duration;
 /**
  * Startup check that {@code engram.base-url} points at the Rust engram-server.
  *
- * <p>It sends {@code GET /health} once and expects
+ * <p>It sends {@code GET /health} without the token, and again with it only
+ * if that answer is 401, 403 or 407. It expects
  * {@code {"status":"ok","service":"engram"}}. A server that answers something
  * else (the Python Engram server, another service, a redirect, a 401) fails
  * startup with an {@link EngramServerMismatchException} that says what was
@@ -46,7 +47,18 @@ final class EngramServerCheck {
     void verify() {
         HttpResponse<String> health;
         try {
-            health = get("/health");
+            // First without the token: the Rust server's /health is open, so a
+            // server that is not Engram never sees the token.
+            health = get("/health", false);
+            int first = health.statusCode();
+            if ((first == 401 || first == 403 || first == 407) && token != null && !token.isBlank()) {
+                // The server, or a proxy in front of it, wants a token for
+                // /health. The client sends it on every request anyway.
+                health = get("/health", true);
+            }
+        } catch (IllegalArgumentException e) {
+            throw mismatch("the request to GET /health could not be built (an HTTP header value was refused; "
+                    + "not shown, it may hold the token).");
         } catch (IOException e) {
             warnUnchecked("it could not be reached (" + e.getClass().getSimpleName()
                     + (e.getMessage() == null ? "" : ": " + e.getMessage()) + ")");
@@ -87,7 +99,7 @@ final class EngramServerCheck {
 
     private String whatAnswersHealthz() {
         try {
-            HttpResponse<String> healthz = get("/healthz");
+            HttpResponse<String> healthz = get("/healthz", false);
             if (healthz.statusCode() == 200) {
                 return " GET /healthz answered HTTP 200, so this looks like the Python Engram server.";
             }
@@ -99,12 +111,12 @@ final class EngramServerCheck {
         return " This is not an Engram REST server, or engram.base-url has the wrong host, port or path.";
     }
 
-    private HttpResponse<String> get(String path) throws IOException, InterruptedException {
+    private HttpResponse<String> get(String path, boolean withToken) throws IOException, InterruptedException {
         HttpRequest.Builder request = HttpRequest.newBuilder(URI.create(baseUrl + path))
                 .timeout(timeout)
                 .header("Accept", "application/json")
                 .GET();
-        if (token != null && !token.isBlank()) {
+        if (withToken && token != null && !token.isBlank()) {
             request.header("Authorization", "Bearer " + token);
         }
         return http.send(request.build(), HttpResponse.BodyHandlers.ofString());

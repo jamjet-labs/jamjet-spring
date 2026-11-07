@@ -25,6 +25,7 @@ final class StubEngramServer implements AutoCloseable {
     private final HttpServer server;
     private final List<Seen> seen = new CopyOnWriteArrayList<>();
     private final Map<String, Answer> answers = new ConcurrentHashMap<>();
+    private final Map<String, String> requiredTokens = new ConcurrentHashMap<>();
 
     private StubEngramServer() throws IOException {
         server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
@@ -33,8 +34,13 @@ final class StubEngramServer implements AutoCloseable {
             seen.add(new Seen(exchange.getRequestMethod(), path,
                     exchange.getRequestHeaders().getFirst("Authorization")));
             exchange.getRequestBody().readAllBytes();
-            Answer answer = answers.getOrDefault(exchange.getRequestMethod() + " " + path,
-                    new Answer(404, "application/json", "{\"detail\":\"Not Found\"}"));
+            String key = exchange.getRequestMethod() + " " + path;
+            String required = requiredTokens.get(key);
+            String auth = exchange.getRequestHeaders().getFirst("Authorization");
+            Answer answer = required != null && !("Bearer " + required).equals(auth)
+                    ? new Answer(401, "application/json", "{\"error\":\"invalid bearer token\"}")
+                    : answers.getOrDefault(key,
+                            new Answer(404, "application/json", "{\"detail\":\"Not Found\"}"));
             byte[] body = answer.body().getBytes(StandardCharsets.UTF_8);
             exchange.getResponseHeaders().add("Content-Type", answer.contentType());
             exchange.sendResponseHeaders(answer.status(), body.length == 0 ? -1 : body.length);
@@ -65,6 +71,12 @@ final class StubEngramServer implements AutoCloseable {
 
     StubEngramServer answer(String method, String path, int status, String json) {
         answers.put(method + " " + path, new Answer(status, "application/json", json));
+        return this;
+    }
+
+    /** Answers 401 on {@code method path} unless the request carries this bearer token. */
+    StubEngramServer requireToken(String method, String path, String token) {
+        requiredTokens.put(method + " " + path, token);
         return this;
     }
 

@@ -159,21 +159,33 @@ public class EngramProperties {
         }
 
         /**
-         * When {@code true}, Engram registers an
-         * {@link EngramChatMemoryRepository} as the
-         * {@link org.springframework.ai.chat.memory.ChatMemoryRepository} bean.
-         * Default: {@code false}, because jamjet-engram-server 0.5.0 does not
-         * serve the routes it reads and deletes with.
+         * Whether Engram registers an {@link EngramChatMemoryRepository} as the
+         * {@link org.springframework.ai.chat.memory.ChatMemoryRepository} bean:
+         * {@code off} (default), {@code save-only} (saves go to Engram, reads
+         * return an empty history and deletes do nothing, with one warning), or
+         * {@code on}. {@code true} and {@code false} mean {@code on} and
+         * {@code off}. jamjet-engram-server 0.5.0 does not serve the routes
+         * the repository reads and deletes with, so {@code on} fails there.
          */
-        private boolean chatMemoryRepository = false;
+        private ChatMemoryRepositoryMode chatMemoryRepository = ChatMemoryRepositoryMode.OFF;
 
-        public boolean isChatMemoryRepository() {
+        public ChatMemoryRepositoryMode getChatMemoryRepository() {
             return chatMemoryRepository;
         }
 
-        public void setChatMemoryRepository(boolean chatMemoryRepository) {
+        public void setChatMemoryRepository(ChatMemoryRepositoryMode chatMemoryRepository) {
             this.chatMemoryRepository = chatMemoryRepository;
         }
+    }
+
+    /** Values of {@code engram.spring-ai.chat-memory-repository}. */
+    public enum ChatMemoryRepositoryMode {
+        /** No Engram repository (default). {@code false} binds to this. */
+        OFF,
+        /** Saves go to Engram; reads return an empty history; deletes do nothing. */
+        SAVE_ONLY,
+        /** Saves, reads and deletes go to Engram. {@code true} binds to this. */
+        ON
     }
 
     public static class Health {

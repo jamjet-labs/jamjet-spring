@@ -43,17 +43,20 @@ final class EngramTokens {
 
     /**
      * Trims the token (a value read from a file usually ends in a newline) and
-     * refuses one that still holds a control character. Never puts the value
-     * in the message: an HTTP header error would print it whole.
+     * accepts only visible ASCII (0x21 to 0x7E), the characters a bearer token
+     * is made of (RFC 6750). Anything else, such as a control character or a
+     * pasted zero-width space, would make the JDK refuse the header with an
+     * error that prints the whole value, so it is refused here, and the
+     * message never contains the value.
      */
     private static String checked(String token, String source) {
         String trimmed = token.strip();
         for (int i = 0; i < trimmed.length(); i++) {
             char c = trimmed.charAt(i);
-            if (c < 0x20 || c == 0x7f) {
+            if (c < 0x21 || c > 0x7e) {
                 throw new IllegalStateException("Engram: the token from " + source
-                        + " contains a control character (at position " + i + "), so it cannot be sent "
-                        + "as an HTTP header. Check how the value is set; it is not shown here.");
+                        + " has a character that is not visible ASCII (at position " + i + "), so it cannot "
+                        + "be sent as a bearer token. Check how the value is set; it is not shown here.");
             }
         }
         return trimmed;

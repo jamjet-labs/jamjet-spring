@@ -124,7 +124,7 @@ public class EngramContextAdvisor implements BaseAdvisor {
         } catch (Exception e) {
             EngramSdkInterrupts.undo(e, interruptedBefore);
             EngramRoutes.throwIfNotServed(e, EngramRoutes.CONTEXT, properties.getBaseUrl());
-            log.warn("Engram context lookup failed, proceeding without memory: {}", e.getMessage());
+            log.warn("Engram context lookup failed, proceeding without memory: {}", EngramErrors.safeMessage(e));
             return request;
         }
     }

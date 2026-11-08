@@ -57,7 +57,7 @@ class JamjetChatClientWiringTest {
     @Test
     void theDefaultChatClientIsRecordedAndAudited() {
         runtime.on("POST", "/workflows", 201, "{\"workflow_id\":\"spring-ai-chat\",\"version\":\"1.0.0\"}")
-                .on("POST", "/executions", 201, "{\"execution_id\":\"exec_1\"}")
+                .on("POST", "/executions", 201, "{\"execution_id\":\"exec_1\"}").acceptsWorkItems("exec_1")
                 .on("POST", "/executions/exec_1/external-event", 200, "{\"accepted\":true}");
 
         runner.run(context -> {
@@ -111,7 +111,7 @@ class JamjetChatClientWiringTest {
     @Test
     void aCallThatUsesToolsIsOneExecutionWithEveryRoundAudited() {
         runtime.on("POST", "/workflows", 201, "{\"workflow_id\":\"spring-ai-chat\",\"version\":\"1.0.0\"}")
-                .on("POST", "/executions", 201, "{\"execution_id\":\"exec_1\"}")
+                .on("POST", "/executions", 201, "{\"execution_id\":\"exec_1\"}").acceptsWorkItems("exec_1")
                 .on("POST", "/executions/exec_1/external-event", 200, "{\"accepted\":true}");
         var model = new ToolCallingModel();
         var toolRuns = new java.util.concurrent.atomic.AtomicInteger();

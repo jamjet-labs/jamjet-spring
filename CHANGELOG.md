@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.0 (unreleased)
+
+### Runtime compatibility
+
+- A JamJet runtime built after jamjet PR #169 refuses a workflow with a node kind nothing executes, and nothing executes a `wait` node. 0.2.x registered its recorded-call workflows (`spring-ai-chat`, `langchain4j-durable-agent`, `langchain4j-chat-memory`) with one `wait` node, so on such a runtime every advised call fails closed with `400 invalid workflow IR`. They are now registered as v2.0.0 with one `external_fn` node on a queue of the application's own (`<workflow-id>.calls`; `langchain4j-chat-memory.memory` for chat memory, whose node is completed as soon as the memory's execution starts).
+- The durability advisor and the LangChain4j durable agent claim that node's work item when the call starts, renew the lease while it runs, and complete it with the call's outcome when it ends (or fail it, when the call failed), echoing `lease_fence` and `idempotency_key`. The execution is `running` while the call runs and `completed` or `failed` after it; on 0.5.x it was completed as soon as it started. The node does not retry, so an application that stops mid-call leaves a failed execution, not an open one. The `spring_ai.completed` and `langchain4j.completed` events are recorded as before.
+- Calls that start at the same time can claim each other's node (a claim hands out the oldest item on the queue). A node claimed for a call in the same JVM goes to that call; one claimed for a call in another instance is held, marked with a `jamjet_spring.node_held` event, and completed from that call's outcome event, or failed if none arrives within an hour (for the advisor, at least `spring.jamjet.approval.timeout` plus 30 minutes).
+- A call does not start until its node is accounted for. If the runtime blocks the node under its policy, or holds it for approval, the call is refused before the model runs with `JamjetGovernanceException` (a held call's execution is cancelled). A claim that fails, or a node not accounted for within 10 seconds, is a runtime error that `on-runtime-error` decides.
+- Known limits until the runtime lets a call claim its own node: with `fail-open`, a backlog on the queue can turn a blocked or held node into a 10-second timeout that runs the call; the `jamjet_spring.node_held` and outcome events can be forged by any token that can write events; and a call whose process died while another instance holds its node stays `running` until the holder gives up.
+- A cancelled stream cancels its execution. The outcome of a model call that throws an `Error` is recorded too.
+- Chat memory goes through the same claim, so a tenant policy that blocks or holds `langchain4j-chat-memory.memory/chat_memory` now refuses memory writes with `JamjetGovernanceException`, and a refused memory's execution is not reused.
+- On a runtime without `external_fn` nodes (0.5.x) the v1.0.0 `wait` workflows are registered instead, unchanged, with a warning, and every call tries v2.0.0 first, so a runtime upgraded in place gets claim-time policy from its next call. `RecordedCallWorkflow.VERSION` is now `2.0.0`; `LEGACY_VERSION` is `1.0.0`; `JamjetDurabilityAdvisor.registeredWorkflowVersion()` says which one is in use.
+- New client methods for the work-item protocol: `claimWorkItem`, `completeWorkItem`, `failWorkItem`, `heartbeatWorkItem`. `JamjetRuntimeClient.close()` now closes the recorders its LangChain4j proxies and chat memory stores share.
+- A workflow id that cannot be a queue name (longer than 58 characters, or other characters than ASCII letters, digits, `-`, `_` and `.`) gets the queue `recorded-calls.<32 hex of its SHA-256>`; `RecordedCallWorkflow.queueFor` returns it.
+- CI runs the integration tests against a runtime built from a pinned jamjet `main` commit as well as against the `jamjetdev/jamjet:0.5.0` image.
+
 ## 0.2.1 (unreleased)
 
 The first release of the JamJet modules since 0.1.0, and a fix release for the Engram modules. Every module is 0.2.1. There is no 0.2.0 of `jamjet-spring-boot-starter`, `jamjet-spring-boot-autoconfigure`, `jamjet-spring-boot-starter-test` or `langchain4j-jamjet`: the parent and the Engram modules were published as 0.2.0 on 2026-04-12, and Maven Central does not accept a version twice.

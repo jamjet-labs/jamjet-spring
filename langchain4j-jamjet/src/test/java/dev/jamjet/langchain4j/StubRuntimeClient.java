@@ -3,10 +3,14 @@ package dev.jamjet.langchain4j;
 import dev.jamjet.spring.JamjetProperties;
 import dev.jamjet.spring.client.JamjetClientException;
 import dev.jamjet.spring.client.JamjetRuntimeClient;
+import dev.jamjet.spring.client.RecordedCallWorkflow;
+import dev.jamjet.spring.client.model.ApprovalsView;
+import dev.jamjet.spring.client.model.ClaimedWorkItem;
 import dev.jamjet.spring.client.model.CreateWorkflowResponse;
 import dev.jamjet.spring.client.model.ExecutionEvent;
 import dev.jamjet.spring.client.model.ExecutionState;
 import dev.jamjet.spring.client.model.StartExecutionResponse;
+import dev.jamjet.spring.client.model.WorkItemHeartbeat;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -21,7 +25,10 @@ import java.util.UUID;
  * An in-memory stand-in for the runtime that refuses what the real one refuses:
  * IR without workflow_id/version/start_node-in-nodes/edges-as-list (400),
  * executions of unregistered workflows (404), and execution ids that are not
- * {@code exec_<uuid>} (400, as {@code parse_execution_id} does).
+ * {@code exec_<uuid>} (400, as {@code parse_execution_id} does). An
+ * {@code external_fn} start node puts a work item on its queue, handed out by
+ * {@link #claimWorkItem} oldest first and settled only with the claim's fence,
+ * as the runtime does.
  */
 class StubRuntimeClient extends JamjetRuntimeClient {
 
@@ -31,6 +38,24 @@ class StubRuntimeClient extends JamjetRuntimeClient {
     private final List<ExecutionState> executions = Collections.synchronizedList(new ArrayList<>());
     private final List<RecordedEvent> events = Collections.synchronizedList(new ArrayList<>());
     private int workflowCalls;
+    /** A work item: execution, queue, claimed fence (0 while pending), and how it was settled. */
+    static final class Item {
+        final String id = UUID.randomUUID().toString();
+        final String executionId;
+        final String queue;
+        long fence;
+        String settled;
+        Map<String, Object> output;
+
+        Item(String executionId, String queue) {
+            this.executionId = executionId;
+            this.queue = queue;
+        }
+    }
+
+    private final List<Item> items = Collections.synchronizedList(new ArrayList<>());
+    private final Map<String, String> statuses = Collections.synchronizedMap(new HashMap<>());
+    private long fences;
     private boolean unavailable;
     private boolean eventsFail;
     final java.util.concurrent.atomic.AtomicInteger listCalls = new java.util.concurrent.atomic.AtomicInteger();
@@ -103,7 +128,142 @@ class StubRuntimeClient extends JamjetRuntimeClient {
         var uuid = UUID.randomUUID();
         executions.add(new ExecutionState(uuid.toString(), workflowId, v, "running",
                 new LinkedHashMap<>(input), new LinkedHashMap<>(input), Instant.now(), Instant.now(), null));
-        return new StartExecutionResponse("exec_" + uuid.toString().replace("-", ""));
+        String executionId = "exec_" + uuid.toString().replace("-", "");
+        statuses.put(executionId, "running");
+        var ir = workflows.get(workflowId + "@" + v);
+        var node = (Map<?, ?>) ((Map<?, ?>) ir.get("nodes")).get(ir.get("start_node"));
+        if (node.get("kind") instanceof Map<?, ?> kind && "external_fn".equals(kind.get("type"))) {
+            items.add(new Item(executionId, (String) kind.get("queue")));
+        }
+        return new StartExecutionResponse(executionId);
+    }
+
+    @Override
+    public synchronized ClaimedWorkItem claimWorkItem(String workerId, List<String> queueTypes,
+                                                      java.time.Duration lease) {
+        checkUp("/work-items/claim");
+        synchronized (items) {
+            for (Item item : items) {
+                if (item.fence == 0 && item.settled == null && queueTypes.contains(item.queue)) {
+                    item.fence = ++fences;
+                    return new ClaimedWorkItem(item.id, item.executionId, "node", item.queue, Map.of(), 0,
+                            item.fence, lease.toSeconds(), "key-" + item.id);
+                }
+            }
+        }
+        return null;
+    }
+
+    private Item held(String id, long fence, String path) {
+        synchronized (items) {
+            for (Item item : items) {
+                if (item.id.equals(id)) {
+                    if (item.fence != fence || item.settled != null) {
+                        throw new JamjetClientException(409, "{\"reason\":\"stale or invalid lease fence\"}", path);
+                    }
+                    return item;
+                }
+            }
+        }
+        throw new JamjetClientException(404, "{\"error\":\"work item\"}", path);
+    }
+
+    @Override
+    public void completeWorkItem(String workItemId, Map<String, Object> output, long durationMs, long leaseFence,
+                                 String idempotencyKey) {
+        checkUp("/work-items/" + workItemId + "/complete");
+        Item item = held(workItemId, leaseFence, "/work-items/" + workItemId + "/complete");
+        item.settled = "completed";
+        item.output = output;
+        statuses.put(item.executionId, "completed");
+    }
+
+    @Override
+    public void failWorkItem(String workItemId, String error, long leaseFence) {
+        checkUp("/work-items/" + workItemId + "/fail");
+        Item item = held(workItemId, leaseFence, "/work-items/" + workItemId + "/fail");
+        item.settled = "failed";
+        item.output = Map.of("error", error);
+        statuses.put(item.executionId, "failed");
+    }
+
+    @Override
+    public WorkItemHeartbeat heartbeatWorkItem(String workItemId, String workerId, long leaseFence) {
+        checkUp("/work-items/" + workItemId + "/heartbeat");
+        Item item = held(workItemId, leaseFence, "/work-items/" + workItemId + "/heartbeat");
+        return new WorkItemHeartbeat(true, item.fence, false, false);
+    }
+
+    @Override
+    public ExecutionState getExecution(String executionId) {
+        checkUp("/executions/" + executionId);
+        String status = statuses.get(executionId);
+        if (status == null) {
+            throw new JamjetClientException(404, "{\"error\":\"execution " + executionId + "\"}",
+                    "/executions/" + executionId);
+        }
+        return new ExecutionState(executionId, null, null, status, Map.of(), Map.of(), Instant.now(),
+                Instant.now(), null);
+    }
+
+    @Override
+    public ApprovalsView listApprovals(String executionId) {
+        checkUp("/executions/" + executionId + "/approvals");
+        return new ApprovalsView(List.of(), List.of());
+    }
+
+    @Override
+    public ClaimedWorkItem claimWorkItem(String workerId, List<String> queueTypes, java.time.Duration lease,
+                                         java.time.Duration timeout) {
+        return claimWorkItem(workerId, queueTypes, lease);
+    }
+
+    @Override
+    public WorkItemHeartbeat heartbeatWorkItem(String workItemId, String workerId, long leaseFence,
+                                               java.time.Duration timeout) {
+        return heartbeatWorkItem(workItemId, workerId, leaseFence);
+    }
+
+    @Override
+    public List<ExecutionEvent> listEvents(String executionId, java.time.Duration timeout) {
+        return listEvents(executionId);
+    }
+
+    @Override
+    public void sendExternalEvent(String executionId, String correlationKey, Map<String, Object> payload,
+                                  java.time.Duration timeout) {
+        sendExternalEvent(executionId, correlationKey, payload);
+    }
+
+    @Override
+    public void completeWorkItem(String workItemId, Map<String, Object> output, long durationMs, long leaseFence,
+                                 String idempotencyKey, java.time.Duration timeout) {
+        completeWorkItem(workItemId, output, durationMs, leaseFence, idempotencyKey);
+    }
+
+    @Override
+    public void failWorkItem(String workItemId, String error, long leaseFence, java.time.Duration timeout) {
+        failWorkItem(workItemId, error, leaseFence);
+    }
+
+    @Override
+    public void cancelExecution(String executionId, java.time.Duration timeout) {
+        cancelExecution(executionId);
+    }
+
+    @Override
+    public void cancelExecution(String executionId) {
+        checkUp("/executions/" + executionId + "/cancel");
+        statuses.put(executionId, "cancelled");
+    }
+
+    /** The status the stub holds for an execution: running until its item is completed or failed. */
+    String status(String executionId) {
+        return statuses.get(executionId);
+    }
+
+    List<Item> items() {
+        return List.copyOf(items);
     }
 
     @Override
@@ -182,7 +342,7 @@ class StubRuntimeClient extends JamjetRuntimeClient {
     }
 
     Map<String, Object> registeredIr(String workflowId) {
-        return workflows.get(workflowId + "@1.0.0");
+        return workflows.get(workflowId + "@" + RecordedCallWorkflow.VERSION);
     }
 
     private static JamjetProperties defaultProps() {

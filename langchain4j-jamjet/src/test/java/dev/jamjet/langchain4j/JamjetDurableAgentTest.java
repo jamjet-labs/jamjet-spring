@@ -50,9 +50,21 @@ class JamjetDurableAgentTest {
 
         assertThat(runtime.getWorkflowCalls()).isEqualTo(1);
         var ir = runtime.registeredIr(JamjetDurableAgent.WORKFLOW_ID);
-        assertThat(ir).containsEntry("version", "1.0.0");
+        assertThat(ir).containsEntry("version", "2.0.0");
         assertThat(((Map<?, ?>) ir.get("nodes")).containsKey(ir.get("start_node"))).isTrue();
         assertThat(ir.get("edges")).isInstanceOf(List.class);
+        var node = (Map<?, ?>) ((Map<?, ?>) ir.get("nodes")).get(ir.get("start_node"));
+        @SuppressWarnings("unchecked")
+        var kind = (Map<String, Object>) node.get("kind");
+        assertThat(kind).containsEntry("type", "external_fn")
+                .containsEntry("queue", "langchain4j-durable-agent.calls");
+
+        // Each call's node was claimed and completed with its outcome.
+        assertThat(runtime.items()).hasSize(2).allSatisfy(item -> {
+            assertThat(item.settled).isEqualTo("completed");
+            assertThat(item.output).containsEntry("status", "completed");
+            assertThat(runtime.status(item.executionId)).isEqualTo("completed");
+        });
 
         assertThat(runtime.getExecutionCount()).isEqualTo(2);
         var events = runtime.getEvents();
@@ -95,6 +107,23 @@ class JamjetDurableAgentTest {
         assertThat(runtime.getEvents()).singleElement().satisfies(e -> {
             assertThat(e.correlationKey()).isEqualTo("langchain4j.completed");
             assertThat(e.payload()).containsEntry("status", "failed");
+        });
+        assertThat(runtime.items()).singleElement().satisfies(item -> {
+            assertThat(item.settled).as("a failed call fails its node").isEqualTo("failed");
+            assertThat(item.output).containsEntry("error", "LLM timeout");
+        });
+    }
+
+    @Test
+    void whenTheOutcomeEventCannotBeWrittenTheNodeStillGetsTheOutcome() {
+        runtime.setEventsFail(true);
+        TestAssistant durable = JamjetDurableAgent.wrap(new SimpleAssistant(), TestAssistant.class, runtime);
+
+        assertThatThrownBy(() -> durable.answer("test"))
+                .isInstanceOf(dev.jamjet.spring.JamjetRecordingException.class);
+        assertThat(runtime.items()).singleElement().satisfies(item -> {
+            assertThat(item.settled).isEqualTo("completed");
+            assertThat(item.output).containsEntry("status", "completed");
         });
     }
 

@@ -4,9 +4,9 @@ import dev.jamjet.spring.RuntimeErrorMode;
 import dev.jamjet.spring.client.JamjetClientException;
 import dev.jamjet.spring.client.JamjetRuntimeClient;
 import dev.jamjet.spring.client.RecordedCallWorkflow;
+import dev.jamjet.spring.client.RecordedCalls;
 import dev.jamjet.spring.client.model.ExecutionEvent;
 import dev.jamjet.spring.client.model.ExecutionState;
-import dev.jamjet.spring.client.model.StartExecutionResponse;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.ChatMessageDeserializer;
 import dev.langchain4j.data.message.ChatMessageSerializer;
@@ -33,6 +33,15 @@ import java.util.Collections;
  * Every update appends a {@code chat_memory} external event holding the full
  * message list; a delete appends {@code chat_memory_cleared}. Reads take the
  * latest of the two from {@code GET /executions/{id}/events}.
+ *
+ * <p>The workflow's one node is an {@code external_fn} node on the
+ * {@code langchain4j-chat-memory.memory} queue. The store claims and completes it
+ * as soon as the memory's execution starts, so no memory keeps an execution
+ * running (the runtime's scheduler looks at running executions on every tick);
+ * the memory's events are appended to the completed execution. On a runtime that
+ * predates {@code external_fn} nodes (0.5.x) a {@code wait} node is registered
+ * instead, which that runtime completes at once. The events are the memory either
+ * way, and memories written under either version are found.
  *
  * <p>The runtime has no lookup by input, so the first access to a memory id in a
  * process scans {@code GET /executions} for its execution and caches the result.
@@ -83,7 +92,7 @@ public class JamjetChatMemoryStore implements ChatMemoryStore {
     private final Map<String, Instant> misses;
     /** Striped: bounded no matter how many memory ids a process sees. */
     private final Object[] locks = new Object[64];
-    private volatile boolean registered;
+    private final RecordedCalls memories;
 
     /** Fail-closed store for this namespace (use the application's name). */
     public JamjetChatMemoryStore(JamjetRuntimeClient client, String namespace) {
@@ -115,6 +124,8 @@ public class JamjetChatMemoryStore implements ChatMemoryStore {
         this.missTtl = missTtl == null ? DEFAULT_MISS_TTL : missTtl;
         this.executions = lru(maxCachedIds);
         this.misses = lru(maxCachedIds);
+        // Shared per client, so closing the client closes it.
+        this.memories = RecordedCalls.shared(client, spec());
         for (int i = 0; i < locks.length; i++) {
             locks[i] = new Object();
         }
@@ -227,30 +238,14 @@ public class JamjetChatMemoryStore implements ChatMemoryStore {
             if (existing != null) {
                 return existing;
             }
-            ensureRegistered();
             var input = new LinkedHashMap<String, Object>();
             input.put("namespace", namespace);
             input.put("memory_id", memoryId);
-            StartExecutionResponse started;
-            try {
-                started = client.startExecution(WORKFLOW_ID, RecordedCallWorkflow.VERSION, input);
-            } catch (JamjetClientException e) {
-                if (e.getStatusCode() != 404) {
-                    throw e;
-                }
-                // The runtime forgot the workflow (store reset): register again, retry once.
-                synchronized (this) {
-                    registered = false;
-                }
-                ensureRegistered();
-                started = client.startExecution(WORKFLOW_ID, RecordedCallWorkflow.VERSION, input);
-            }
-            if (started == null || started.executionId() == null || started.executionId().isBlank()) {
-                throw new JamjetClientException("the runtime returned no execution_id", "/executions");
-            }
-            executions.put(memoryId, started.executionId());
+            // Registers the workflow first (again if the runtime forgot it).
+            String executionId = memories.start(input);
+            executions.put(memoryId, executionId);
             misses.remove(memoryId);
-            return started.executionId();
+            return executionId;
         }
     }
 
@@ -265,7 +260,9 @@ public class JamjetChatMemoryStore implements ChatMemoryStore {
         for (int offset = 0; ; offset += PAGE) {
             List<ExecutionState> page = client.listExecutions(null, PAGE, offset);
             for (ExecutionState e : page) {
+                // A cancelled or failed execution is not a memory (the runtime refused it).
                 if (WORKFLOW_ID.equals(e.workflowId()) && e.initialInput() != null
+                        && !"cancelled".equalsIgnoreCase(e.status()) && !"failed".equalsIgnoreCase(e.status())
                         && namespace.equals(e.initialInput().get("namespace"))
                         && memoryId.equals(e.initialInput().get("memory_id"))) {
                     if (best == null || (e.startedAt() != null
@@ -281,15 +278,22 @@ public class JamjetChatMemoryStore implements ChatMemoryStore {
         }
     }
 
-    static Map<String, Object> workflowIr() {
-        return RecordedCallWorkflow.ir(WORKFLOW_ID, "memory",
-                "langchain4j.chat_memory.closed", "LangChain4j chat memory", "langchain4j-jamjet");
+    /** Queue of the memory workflow's node, which nothing claims. */
+    public static final String QUEUE = RecordedCallWorkflow.queueFor(WORKFLOW_ID, "memory");
+
+    static RecordedCalls.Spec spec() {
+        return new RecordedCalls.Spec(WORKFLOW_ID, "memory", "langchain4j.chat_memory.closed",
+                "LangChain4j chat memory", "langchain4j-jamjet", QUEUE, "chat_memory",
+                "LangChain4j chat memory, kept as " + UPDATE_EVENT + " and " + CLEARED_EVENT + " events; the "
+                        + "application completes this node when the memory is created",
+                Map.of("status", "recorded"));
     }
 
-    private synchronized void ensureRegistered() {
-        if (!registered) {
-            client.createWorkflow(workflowIr());
-            registered = true;
-        }
+    static Map<String, Object> workflowIr() {
+        return spec().ir();
+    }
+
+    static Map<String, Object> legacyWorkflowIr() {
+        return spec().legacyIr();
     }
 }

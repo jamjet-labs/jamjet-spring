@@ -39,7 +39,7 @@ class JamjetDurabilityAdvisorTest {
 
     private void runtimeAccepts() {
         runtime.on("POST", "/workflows", 201, "{\"workflow_id\":\"spring-ai-chat\",\"version\":\"2.0.0\"}")
-                .on("POST", "/executions", 201, "{\"execution_id\":\"exec_1\"}")
+                .on("POST", "/executions", 201, "{\"execution_id\":\"exec_1\"}").acceptsWorkItems("exec_1")
                 .on("POST", "/executions/exec_1/external-event", 200,
                         "{\"execution_id\":\"exec_1\",\"accepted\":true}");
     }
@@ -144,7 +144,7 @@ class JamjetDurabilityAdvisorTest {
     @Test
     void failsClosedAsARecordingFailureWhenTheCompletionCannotBeRecorded() {
         runtime.on("POST", "/workflows", 201, "{\"workflow_id\":\"spring-ai-chat\",\"version\":\"2.0.0\"}")
-                .on("POST", "/executions", 201, "{\"execution_id\":\"exec_1\"}")
+                .on("POST", "/executions", 201, "{\"execution_id\":\"exec_1\"}").acceptsWorkItems("exec_1")
                 .on("POST", "/executions/exec_1/external-event", 503, "{\"error\":\"unavailable\"}");
         var chat = chatClient(StubChatModel.answering("hello"));
 
@@ -188,7 +188,7 @@ class JamjetDurabilityAdvisorTest {
         // The runtime's store was reset: it no longer knows the workflow until it is registered again.
         runtime.on("POST", "/executions", 404, "{\"error\":\"workflow spring-ai-chat v2.0.0\"}");
         runtime.whenReceived("POST", "/workflows",
-                () -> runtime.on("POST", "/executions", 201, "{\"execution_id\":\"exec_1\"}"));
+                () -> runtime.on("POST", "/executions", 201, "{\"execution_id\":\"exec_1\"}").acceptsWorkItems("exec_1"));
 
         assertThat(chat.prompt("second").call().content()).isEqualTo("hello");
         assertThat(runtime.count("POST", "/workflows")).isEqualTo(2);
@@ -233,17 +233,30 @@ class JamjetDurabilityAdvisorTest {
     void aCallTheRuntimeHoldsForApprovalIsRefusedEvenWhenFailOpen() {
         props.setOnRuntimeError(RuntimeErrorMode.FAIL_OPEN);
         runtimeAccepts();
+        // The claim gate held the node: nothing is handed out, and the request is in the log.
         runtime.on("POST", "/work-items/claim", 200, "{\"claimed\":false}")
-                .on("GET", "/executions/exec_1", 200,
-                        "{\"execution_id\":\"exec_1\",\"workflow_version\":\"2.0.0\",\"status\":\"running\"}")
-                .on("GET", "/executions/exec_1/approvals", 200,
-                        "{\"pending\":[{\"node_id\":\"chat\",\"context\":{}}],\"decided\":[]}")
-                .on("POST", "/executions/exec_1/cancel", 200, "{}");
+                .on("GET", "/executions/exec_1/events", 200, """
+                        {"events":[{"id":"e1","execution_id":"exec_1","sequence":3,"kind":{"type":"tool_approval_required",
+                        "node_id":"chat","tool_name":"spring-ai-chat.calls/record_call","approver":"human","context":{}}}]}""");
         var model = StubChatModel.answering("hello");
 
         assertThatThrownBy(() -> chatClient(model).prompt("hi").call().content())
                 .isInstanceOf(JamjetGovernanceException.class)
                 .hasMessageContaining("for approval");
         assertThat(model.calls).as("the model is never called").hasValue(0);
+        assertThat(posts("/executions/exec_1/cancel")).hasSize(1);
+    }
+
+    @Test
+    void aClaimTheRuntimeCannotAnswerRefusesTheCallInFailClosedMode() {
+        runtimeAccepts();
+        runtime.on("POST", "/work-items/claim", 503, "{\"error\":\"backend unavailable\"}");
+        var model = StubChatModel.answering("hello");
+
+        assertThatThrownBy(() -> chatClient(model).prompt("hi").call().content())
+                .isInstanceOf(JamjetGovernanceException.class)
+                .hasMessageContaining("backend unavailable");
+        assertThat(model.calls).hasValue(0);
+        assertThat(posts("/executions/exec_1/cancel")).as("the started execution is cancelled").hasSize(1);
     }
 }

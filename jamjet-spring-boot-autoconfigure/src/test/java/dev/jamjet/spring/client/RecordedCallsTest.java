@@ -35,7 +35,7 @@ class RecordedCallsTest {
         calls = new RecordedCalls(new JamjetRuntimeClient(props),
                 RecordedCalls.Spec.call("spring-ai-chat", "chat", "spring_ai.completed", "Spring AI ChatClient call",
                         "test"),
-                true, RecordedCalls.DEFAULT_LEASE, Duration.ofMinutes(5)).manualUpkeep();
+                RecordedCalls.DEFAULT_LEASE, Duration.ofMinutes(5), Duration.ofMillis(400)).manualUpkeep();
         runtime.on("POST", "/workflows", 201, "{\"workflow_id\":\"spring-ai-chat\",\"version\":\"2.0.0\"}")
                 .on("POST", "/executions", 201, "{\"execution_id\":\"exec_1\"}");
     }
@@ -144,8 +144,14 @@ class RecordedCallsTest {
                 .on("POST", "/work-items/wi-other/complete", 200, "{\"completed\":true}")
                 .on("GET", "/executions/exec_other/events", 200, "{\"events\":[]}");
 
+        runtime.on("POST", "/executions/exec_other/external-event", 200, "{\"accepted\":true}");
+
         calls.start(Map.of());
         assertThat(calls.heldExecutions()).containsExactlyInAnyOrder("exec_1", "exec_other");
+        // The other call's owner learns its node was handed out.
+        JsonNode marker = body(posts("/executions/exec_other/external-event").get(0));
+        assertThat(marker.get("correlation_key").asText()).isEqualTo(RecordedCalls.HELD_EVENT);
+        assertThat(marker.at("/payload/work_item_id").asText()).isEqualTo("wi-other");
         calls.finish("exec_1", Map.of("status", "completed"));
         assertThat(posts("/work-items/wi-1/complete")).hasSize(1);
 
@@ -185,7 +191,7 @@ class RecordedCallsTest {
         // A lease longer than the timeout, so the timeout is what ends it.
         try (var shortWait = new RecordedCalls(new JamjetRuntimeClient(props),
                 RecordedCalls.Spec.call("spring-ai-chat", "chat", "spring_ai.completed", "n", "test"),
-                true, Duration.ofMinutes(10), Duration.ofSeconds(30)).manualUpkeep()) {
+                Duration.ofMinutes(10), Duration.ofSeconds(30)).manualUpkeep()) {
             claimsAnswer(item("wi-other", "exec_other", 3), item("wi-1", "exec_1", 4));
             runtime.on("GET", "/executions/exec_other/events", 200, "{\"events\":[]}")
                     .on("POST", "/work-items/wi-other/heartbeat", 200,
@@ -201,15 +207,22 @@ class RecordedCallsTest {
         }
     }
 
+    private void eventsOfExec1(String... kinds) {
+        var events = new StringBuilder("{\"events\":[");
+        for (int i = 0; i < kinds.length; i++) {
+            events.append(i == 0 ? "" : ",").append("{\"id\":\"e").append(i).append("\",\"execution_id\":\"exec_1\",")
+                    .append("\"sequence\":").append(i + 1).append(",\"kind\":").append(kinds[i]).append('}');
+        }
+        runtime.on("GET", "/executions/exec_1/events", 200, events.append("]}").toString());
+    }
+
     @Test
     void aNodeTheRuntimeHoldsForApprovalRefusesTheCallAndCancelsIt() {
         claimsAnswer();
-        runtime.on("GET", "/executions/exec_1", 200, """
-                        {"execution_id":"exec_1","workflow_id":"spring-ai-chat","workflow_version":"2.0.0","status":"running"}""")
-                .on("GET", "/executions/exec_1/approvals", 200, """
-                        {"pending":[{"node_id":"chat","tool_name":"spring-ai-chat.calls/record_call","approver":"human",
-                        "context":{"action_digest":"d1"},"sequence":4}],"decided":[]}""")
-                .on("POST", "/executions/exec_1/cancel", 200, "{\"cancelled\":true}");
+        eventsOfExec1("{\"type\":\"workflow_started\"}",
+                "{\"type\":\"tool_approval_required\",\"node_id\":\"chat\",\"tool_name\":\"spring-ai-chat.calls/record_call\","
+                        + "\"approver\":\"human\",\"context\":{\"action_digest\":\"d1\"}}");
+        runtime.on("POST", "/executions/exec_1/cancel", 200, "{\"cancelled\":true}");
 
         assertThatThrownBy(() -> calls.start(Map.of()))
                 .isInstanceOf(JamjetGovernanceException.class)
@@ -220,26 +233,26 @@ class RecordedCallsTest {
 
     @Test
     void aNodeThePolicyBlockedRefusesTheCallWithTheRuntimesReason() {
+        // The block is in the log as soon as the claim answers; the execution's
+        // status only changes on the scheduler's next tick.
         claimsAnswer();
-        runtime.on("GET", "/executions/exec_1", 200, """
-                        {"execution_id":"exec_1","workflow_id":"spring-ai-chat","workflow_version":"2.0.0","status":"failed"}""")
-                .on("GET", "/executions/exec_1/events", 200, """
-                        {"events":[{"id":"e1","execution_id":"exec_1","sequence":3,"kind":{"type":"node_failed",
-                        "node_id":"chat","error":"policy blocked: spring-ai-chat.calls/record_call is blocked",
-                        "attempt":0,"retryable":false}}]}""");
+        eventsOfExec1("{\"type\":\"policy_violation\",\"node_id\":\"chat\",\"rule\":\"block_tool:spring-ai-chat.*\","
+                        + "\"decision\":\"blocked\",\"policy_scope\":\"tenant\"}",
+                "{\"type\":\"node_failed\",\"node_id\":\"chat\",\"error\":\"policy blocked: tool is blocked\","
+                        + "\"attempt\":0,\"retryable\":false}");
+        runtime.on("POST", "/executions/exec_1/cancel", 200, "{\"cancelled\":true}");
 
         assertThatThrownBy(() -> calls.start(Map.of()))
                 .isInstanceOf(JamjetGovernanceException.class)
-                .hasMessageContaining("ended execution exec_1 (failed) before the call ran")
+                .hasMessageContaining("ended execution exec_1 before the call ran")
                 .hasMessageContaining("policy blocked");
     }
 
     @Test
     void whenAnotherInstanceHoldsTheNodeTheCallGoesAhead() {
         claimsAnswer();
-        runtime.on("GET", "/executions/exec_1", 200, """
-                        {"execution_id":"exec_1","workflow_id":"spring-ai-chat","workflow_version":"2.0.0","status":"running"}""")
-                .on("GET", "/executions/exec_1/approvals", 200, "{\"pending\":[],\"decided\":[]}");
+        eventsOfExec1("{\"type\":\"external_event_received\",\"correlation_key\":\"" + RecordedCalls.HELD_EVENT
+                + "\",\"payload\":{\"worker_id\":\"other\"}}");
 
         assertThat(calls.start(Map.of())).isEqualTo("exec_1");
         calls.finish("exec_1", Map.of("status", "completed"));
@@ -247,11 +260,40 @@ class RecordedCallsTest {
     }
 
     @Test
-    void aClaimTheRuntimeCannotAnswerDoesNotRefuseTheRecordedCall() {
+    void aNodeNobodyAccountsForFailsTheStartAndCancelsTheExecution() {
+        // Withheld with no decision recorded (the runtime could not evaluate its
+        // policy), or claimed by an instance that could not say so.
+        claimsAnswer();
+        eventsOfExec1("{\"type\":\"workflow_started\"}");
+        runtime.on("POST", "/executions/exec_1/cancel", 200, "{\"cancelled\":true}");
+
+        assertThatThrownBy(() -> calls.start(Map.of()))
+                .isInstanceOfSatisfying(JamjetClientException.class, e -> assertThat(e.getMessage())
+                        .contains("did not hand out the node of execution exec_1"));
+        assertThat(posts("/executions/exec_1/cancel")).hasSize(1);
+        assertThat(posts("/work-items/claim").size()).as("kept claiming while it waited").isGreaterThan(1);
+    }
+
+    @Test
+    void aClaimTheRuntimeCannotAnswerFailsTheStart() {
         // No route for the claim: the runtime's web UI answers, as it does for a
         // path it does not serve.
-        assertThat(calls.start(Map.of())).isEqualTo("exec_1");
+        runtime.on("POST", "/executions/exec_1/cancel", 200, "{\"cancelled\":true}");
+
+        assertThatThrownBy(() -> calls.start(Map.of())).isInstanceOf(JamjetClientException.class);
+        assertThat(posts("/executions/exec_1/cancel")).hasSize(1);
         assertThat(calls.heldExecutions()).isEmpty();
+    }
+
+    @Test
+    void aCancelledCallCancelsItsExecution() {
+        claimsAnswer(item("wi-1", "exec_1", 7));
+        runtime.on("POST", "/executions/exec_1/cancel", 200, "{\"cancelled\":true}");
+        calls.start(Map.of());
+
+        calls.finish("exec_1", Map.of("status", "cancelled", "streamed", true));
+        assertThat(posts("/executions/exec_1/cancel")).hasSize(1);
+        assertThat(runtime.requests()).noneMatch(r -> r.path().startsWith("/work-items/wi-1"));
     }
 
     @Test

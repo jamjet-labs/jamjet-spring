@@ -35,11 +35,13 @@ import java.util.Collections;
  * latest of the two from {@code GET /executions/{id}/events}.
  *
  * <p>The workflow's one node is an {@code external_fn} node on the
- * {@code langchain4j-chat-memory.memory} queue that nothing claims, so a memory's
- * execution stays {@code running} for as long as the memory exists. On a runtime
- * that predates {@code external_fn} nodes (0.5.x) a {@code wait} node is
- * registered instead, which that runtime completes at once; the events are the
- * memory either way, and memories written under either version are found.
+ * {@code langchain4j-chat-memory.memory} queue. The store claims and completes it
+ * as soon as the memory's execution starts, so no memory keeps an execution
+ * running (the runtime's scheduler looks at running executions on every tick);
+ * the memory's events are appended to the completed execution. On a runtime that
+ * predates {@code external_fn} nodes (0.5.x) a {@code wait} node is registered
+ * instead, which that runtime completes at once. The events are the memory either
+ * way, and memories written under either version are found.
  *
  * <p>The runtime has no lookup by input, so the first access to a memory id in a
  * process scans {@code GET /executions} for its execution and caches the result.
@@ -122,7 +124,7 @@ public class JamjetChatMemoryStore implements ChatMemoryStore {
         this.missTtl = missTtl == null ? DEFAULT_MISS_TTL : missTtl;
         this.executions = lru(maxCachedIds);
         this.misses = lru(maxCachedIds);
-        this.memories = new RecordedCalls(client, spec(), false, null, null);
+        this.memories = new RecordedCalls(client, spec());
         for (int i = 0; i < locks.length; i++) {
             locks[i] = new Object();
         }
@@ -279,8 +281,9 @@ public class JamjetChatMemoryStore implements ChatMemoryStore {
     static RecordedCalls.Spec spec() {
         return new RecordedCalls.Spec(WORKFLOW_ID, "memory", "langchain4j.chat_memory.closed",
                 "LangChain4j chat memory", "langchain4j-jamjet", QUEUE, "chat_memory",
-                "LangChain4j chat memory, held by the application as " + UPDATE_EVENT + " and " + CLEARED_EVENT
-                        + " events; nothing claims this node, so the execution stays open while the memory exists");
+                "LangChain4j chat memory, kept as " + UPDATE_EVENT + " and " + CLEARED_EVENT + " events; the "
+                        + "application completes this node when the memory is created",
+                Map.of("status", "recorded"));
     }
 
     static Map<String, Object> workflowIr() {

@@ -115,7 +115,7 @@ class InitiatorTest {
                 new JamjetDurabilityAdvisor(client, props), new JamjetApprovalAdvisor(client, props, registry))
                 .build();
         runtime.on("POST", "/workflows", 201, "{\"workflow_id\":\"spring-ai-chat\",\"version\":\"1.0.0\"}")
-                .on("POST", "/executions", 201, "{\"execution_id\":\"exec_1\"}");
+                .on("POST", "/executions", 201, "{\"execution_id\":\"exec_1\"}").acceptsWorkItems("exec_1");
 
         var call = CompletableFuture.supplyAsync(() -> as("carol",
                 () -> String.join("", chat.prompt("wire 100")

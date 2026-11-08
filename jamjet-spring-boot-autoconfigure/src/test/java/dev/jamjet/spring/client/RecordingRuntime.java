@@ -90,6 +90,26 @@ public final class RecordingRuntime implements AutoCloseable {
         return this;
     }
 
+    /**
+     * Serve the work-item protocol for one execution, as a runtime with
+     * {@code external_fn} nodes does: every claim hands out its node (item
+     * {@code wi-<executionId>}, fence 1), and completing, failing, renewing it and
+     * cancelling the execution succeed.
+     */
+    public RecordingRuntime acceptsWorkItems(String executionId) {
+        String item = "wi-" + executionId;
+        on("POST", "/work-items/claim", 200, """
+                {"claimed":true,"work_item":{"id":"%s","execution_id":"%s","node_id":"chat",
+                "queue_type":"spring-ai-chat.calls","payload":{},"attempt":0,"lease_fence":1,"lease_secs":60,
+                "idempotency_key":"key-%s"}}""".formatted(item, executionId, item));
+        on("POST", "/work-items/" + item + "/complete", 200, "{\"completed\":true}");
+        on("POST", "/work-items/" + item + "/fail", 200, "{\"failed\":true}");
+        on("POST", "/work-items/" + item + "/heartbeat", 200,
+                "{\"renewed\":true,\"lease_fence\":1,\"reattached\":false,\"cancel_requested\":false}");
+        on("POST", "/executions/" + executionId + "/cancel", 200, "{\"cancelled\":true}");
+        return this;
+    }
+
     /** Run {@code action} when {@code method path} arrives, before it is answered. */
     public RecordingRuntime whenReceived(String method, String path, Runnable action) {
         triggers.put(method + " " + path, action);

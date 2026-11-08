@@ -212,6 +212,29 @@ class StubRuntimeClient extends JamjetRuntimeClient {
         return new ApprovalsView(List.of(), List.of());
     }
 
+    @Override
+    public ClaimedWorkItem claimWorkItem(String workerId, List<String> queueTypes, java.time.Duration lease,
+                                         java.time.Duration timeout) {
+        return claimWorkItem(workerId, queueTypes, lease);
+    }
+
+    @Override
+    public WorkItemHeartbeat heartbeatWorkItem(String workItemId, String workerId, long leaseFence,
+                                               java.time.Duration timeout) {
+        return heartbeatWorkItem(workItemId, workerId, leaseFence);
+    }
+
+    @Override
+    public List<ExecutionEvent> listEvents(String executionId, java.time.Duration timeout) {
+        return listEvents(executionId);
+    }
+
+    @Override
+    public void cancelExecution(String executionId) {
+        checkUp("/executions/" + executionId + "/cancel");
+        statuses.put(executionId, "cancelled");
+    }
+
     /** The status the stub holds for an execution: running until its item is completed or failed. */
     String status(String executionId) {
         return statuses.get(executionId);

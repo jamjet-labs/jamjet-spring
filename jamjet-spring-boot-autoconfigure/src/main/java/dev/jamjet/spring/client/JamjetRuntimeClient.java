@@ -61,6 +61,10 @@ public class JamjetRuntimeClient implements AutoCloseable {
     private final HttpClient httpClient;
     private final ObjectMapper mapper;
 
+    /** {@link RecordedCalls#shared} instances made with this client, by workflow id. */
+    final java.util.concurrent.ConcurrentHashMap<String, RecordedCalls> recordedCalls =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
     public JamjetRuntimeClient(JamjetProperties properties) {
         this.properties = properties;
         this.mapper = new ObjectMapper()
@@ -135,8 +139,15 @@ public class JamjetRuntimeClient implements AutoCloseable {
 
     /** {@code GET /executions/{id}/events}: the execution's event log, in sequence order. */
     public List<ExecutionEvent> listEvents(String executionId) {
-        var result = get("/executions/" + segment(executionId) + "/events",
-                new TypeReference<Map<String, List<ExecutionEvent>>>() {});
+        return listEvents(executionId, null);
+    }
+
+    /** {@link #listEvents(String)} with a read timeout for this request ({@code null}: the configured one). */
+    public List<ExecutionEvent> listEvents(String executionId, Duration timeout) {
+        String path = "/executions/" + segment(executionId) + "/events";
+        var request = buildRequest(path, timeout).GET().build();
+        Map<String, List<ExecutionEvent>> result = send(request, path,
+                mapper.getTypeFactory().constructType(new TypeReference<Map<String, List<ExecutionEvent>>>() {}));
         var events = result == null ? null : result.get("events");
         return events == null ? List.of() : events;
     }
@@ -161,13 +172,19 @@ public class JamjetRuntimeClient implements AutoCloseable {
      * empty queue looks the same as an item the runtime withheld under its policy).
      */
     public ClaimedWorkItem claimWorkItem(String workerId, List<String> queueTypes, Duration lease) {
+        return claimWorkItem(workerId, queueTypes, lease, null);
+    }
+
+    /** {@link #claimWorkItem(String, List, Duration)} with a read timeout for this request. */
+    public ClaimedWorkItem claimWorkItem(String workerId, List<String> queueTypes, Duration lease, Duration timeout) {
         var body = new java.util.LinkedHashMap<String, Object>();
         body.put("worker_id", workerId);
         body.put("queue_types", queueTypes);
         if (lease != null) {
             body.put("lease_secs", Math.max(1, lease.toSeconds()));
         }
-        var result = post("/work-items/claim", body, ClaimResponse.class);
+        ClaimResponse result = post("/work-items/claim", body, mapper.getTypeFactory().constructType(ClaimResponse.class),
+                timeout);
         return result != null && result.claimed() ? result.workItem() : null;
     }
 
@@ -204,8 +221,14 @@ public class JamjetRuntimeClient implements AutoCloseable {
 
     /** {@code POST /work-items/{id}/heartbeat} with body {@code {worker_id, lease_fence}}: renews the lease. */
     public WorkItemHeartbeat heartbeatWorkItem(String workItemId, String workerId, long leaseFence) {
+        return heartbeatWorkItem(workItemId, workerId, leaseFence, null);
+    }
+
+    /** {@link #heartbeatWorkItem(String, String, long)} with a read timeout for this request. */
+    public WorkItemHeartbeat heartbeatWorkItem(String workItemId, String workerId, long leaseFence, Duration timeout) {
         return post("/work-items/" + segment(workItemId) + "/heartbeat",
-                Map.of("worker_id", workerId, "lease_fence", leaseFence), WorkItemHeartbeat.class);
+                Map.of("worker_id", workerId, "lease_fence", leaseFence),
+                mapper.getTypeFactory().constructType(WorkItemHeartbeat.class), timeout);
     }
 
     @com.fasterxml.jackson.annotation.JsonIgnoreProperties(ignoreUnknown = true)
@@ -293,13 +316,17 @@ public class JamjetRuntimeClient implements AutoCloseable {
     }
 
     private <T> T post(String path, Object body, JavaType type) {
+        return post(path, body, type, null);
+    }
+
+    private <T> T post(String path, Object body, JavaType type, Duration timeout) {
         byte[] json;
         try {
             json = mapper.writeValueAsBytes(body);
         } catch (IOException e) {
             throw new JamjetClientException("Failed to serialize request body for " + path, e);
         }
-        var request = buildRequest(path)
+        var request = buildRequest(path, timeout)
                 .POST(HttpRequest.BodyPublishers.ofByteArray(json))
                 .header("Content-Type", "application/json")
                 .build();
@@ -307,9 +334,13 @@ public class JamjetRuntimeClient implements AutoCloseable {
     }
 
     private HttpRequest.Builder buildRequest(String path) {
+        return buildRequest(path, null);
+    }
+
+    private HttpRequest.Builder buildRequest(String path, Duration timeout) {
         var uri = URI.create(stripTrailingSlash(properties.getRuntimeUrl()) + path);
         var builder = HttpRequest.newBuilder(uri)
-                .timeout(Duration.ofSeconds(properties.getReadTimeoutSeconds()))
+                .timeout(timeout != null ? timeout : Duration.ofSeconds(properties.getReadTimeoutSeconds()))
                 .header("Accept", "application/json")
                 .header("User-Agent", USER_AGENT);
         if (properties.getApiToken() != null && !properties.getApiToken().isBlank()) {

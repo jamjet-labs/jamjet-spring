@@ -413,7 +413,7 @@ class JamjetApprovalAdvisorFlowTest {
     private ChatClient recorded(org.springframework.ai.chat.model.ChatModel chatModel,
                                 org.springframework.ai.chat.client.advisor.api.Advisor... more) {
         runtime.on("POST", "/workflows", 201, "{\"workflow_id\":\"spring-ai-chat\",\"version\":\"1.0.0\"}")
-                .on("POST", "/executions", 201, "{\"execution_id\":\"exec_1\"}")
+                .on("POST", "/executions", 201, "{\"execution_id\":\"exec_1\"}").acceptsWorkItems("exec_1")
                 .on("POST", EVENTS, 200, "{\"accepted\":true}");
         var client = new JamjetRuntimeClient(props);
         var advisors = new java.util.ArrayList<org.springframework.ai.chat.client.advisor.api.Advisor>(java.util.List.of(

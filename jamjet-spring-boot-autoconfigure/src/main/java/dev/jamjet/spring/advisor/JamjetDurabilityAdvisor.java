@@ -89,8 +89,8 @@ public class JamjetDurabilityAdvisor implements BaseAdvisor, AutoCloseable {
     public JamjetDurabilityAdvisor(JamjetRuntimeClient client, JamjetProperties properties) {
         this.client = client;
         this.properties = properties;
-        this.calls = new RecordedCalls(client, spec(properties.getWorkflowId()), true,
-                RecordedCalls.DEFAULT_LEASE, unreportedAfter(properties));
+        this.calls = new RecordedCalls(client, spec(properties.getWorkflowId()), RecordedCalls.DEFAULT_LEASE,
+                unreportedAfter(properties));
     }
 
     private static RecordedCalls.Spec spec(String workflowId) {
@@ -112,6 +112,15 @@ public class JamjetDurabilityAdvisor implements BaseAdvisor, AutoCloseable {
         Duration atLeast = approval.plusMinutes(30);
         return atLeast.compareTo(RecordedCalls.DEFAULT_UNREPORTED_AFTER) > 0
                 ? atLeast : RecordedCalls.DEFAULT_UNREPORTED_AFTER;
+    }
+
+    /**
+     * The workflow version this advisor registered: {@link #WORKFLOW_VERSION}, or
+     * {@link RecordedCallWorkflow#LEGACY_VERSION} on a runtime without
+     * {@code external_fn} nodes. {@code null} before the first call.
+     */
+    public String registeredWorkflowVersion() {
+        return calls.registeredVersion();
     }
 
     /** Stops renewing the leases this advisor holds. */
@@ -145,7 +154,7 @@ public class JamjetDurabilityAdvisor implements BaseAdvisor, AutoCloseable {
         ChatClientResponse response;
         try {
             response = chain.nextCall(advised);
-        } catch (RuntimeException e) {
+        } catch (RuntimeException | Error e) {
             recordModelFailure(executionId, e);
             throw e;
         } finally {
@@ -181,8 +190,8 @@ public class JamjetDurabilityAdvisor implements BaseAdvisor, AutoCloseable {
                             .doFinally(signal -> closeApproval(advised))
                             .doOnNext(r -> chars.addAndGet(textOf(r).length()))
                             .onErrorResume(err -> Mono.<ChatClientResponse>fromRunnable(() -> {
-                                        if (settled.compareAndSet(false, true) && err instanceof RuntimeException re) {
-                                            recordModelFailure(executionId, re);
+                                        if (settled.compareAndSet(false, true)) {
+                                            recordModelFailure(executionId, err);
                                         }
                                     })
                                     .subscribeOn(Schedulers.boundedElastic())
@@ -286,7 +295,7 @@ public class JamjetDurabilityAdvisor implements BaseAdvisor, AutoCloseable {
      * caller still gets the model's own error, with the recording failure
      * attached as suppressed (fail-closed) or logged (fail-open).
      */
-    private void recordModelFailure(String executionId, RuntimeException modelError) {
+    private void recordModelFailure(String executionId, Throwable modelError) {
         if (executionId == null) {
             return;
         }
@@ -331,7 +340,7 @@ public class JamjetDurabilityAdvisor implements BaseAdvisor, AutoCloseable {
         return payload;
     }
 
-    private static Map<String, Object> failure(RuntimeException e) {
+    private static Map<String, Object> failure(Throwable e) {
         var payload = new LinkedHashMap<String, Object>();
         payload.put("status", "failed");
         payload.put("error", e.getClass().getSimpleName()

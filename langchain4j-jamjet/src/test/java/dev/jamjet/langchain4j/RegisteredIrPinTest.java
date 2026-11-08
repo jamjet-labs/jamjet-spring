@@ -39,7 +39,7 @@ class RegisteredIrPinTest {
     void chatMemoryIrIsPinnedToItsVersion() throws Exception {
         assertThat(RecordedCallWorkflow.VERSION).isEqualTo("2.0.0");
         assertThat(hash(JamjetChatMemoryStore.workflowIr())).as(bump(JamjetChatMemoryStore.WORKFLOW_ID))
-                .isEqualTo("988e96ee1b93eddc1b8adab4b053e2cabc34d6670975f9483fb52f23785187a1");
+                .isEqualTo("14ed8dd7c6ecbf5cfda00511b7d5cced5624a7c1383e748e356012579f326bdc");
     }
 
     /**

@@ -33,7 +33,7 @@ class JamjetPostCallAndStreamingTest {
         props = new JamjetProperties();
         props.setRuntimeUrl(runtime.url());
         runtime.on("POST", "/workflows", 201, "{\"workflow_id\":\"spring-ai-chat\",\"version\":\"1.0.0\"}")
-                .on("POST", "/executions", 201, "{\"execution_id\":\"exec_1\"}");
+                .on("POST", "/executions", 201, "{\"execution_id\":\"exec_1\"}").acceptsWorkItems("exec_1");
     }
 
     @AfterEach

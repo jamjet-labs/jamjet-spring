@@ -350,6 +350,212 @@ class RuntimeContractIT {
         }
     }
 
+    /** Skip unless the runtime has {@code external_fn} nodes (0.5.x does not). */
+    private static void assumeExternalFn() {
+        var client = new JamjetRuntimeClient(props());
+        try {
+            client.createWorkflow(JamjetDurabilityAdvisor.workflowIr("it-probe-" + UUID.randomUUID()));
+        } catch (JamjetClientException e) {
+            assumeTrue(!e.getRuntimeMessage().contains("unknown variant `external_fn`"),
+                    "this runtime predates external_fn nodes (0.5.x); nothing is claimed on it");
+            throw e;
+        }
+    }
+
+    interface ThrowingRunnable {
+        void run() throws Exception;
+    }
+
+    /** Run {@code body} with the dev tenant's policy set to {@code policy}, then clear it. */
+    private static void withTenantPolicy(Map<String, Object> policy, ThrowingRunnable body) throws Exception {
+        var http = HttpClient.newHttpClient();
+        java.util.function.Function<Object, Integer> put = p -> {
+            try {
+                return http.send(HttpRequest.newBuilder(URI.create(runtimeUrl + "/tenants/default"))
+                                .header("Content-Type", "application/json")
+                                .PUT(HttpRequest.BodyPublishers.ofString(JSON.writeValueAsString(Map.of("policy", p))))
+                                .build(), HttpResponse.BodyHandlers.ofString()).statusCode();
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        };
+        assertThat(put.apply(policy)).as("tenant policy set").isEqualTo(200);
+        try {
+            body.run();
+        } finally {
+            put.apply(Map.of());
+        }
+    }
+
+    private static ChatModel counting(java.util.concurrent.atomic.AtomicInteger calls) {
+        return new ChatModel() {
+            @Override
+            public ChatResponse call(Prompt prompt) {
+                calls.incrementAndGet();
+                return new ChatResponse(List.of(new Generation(new AssistantMessage("ran"))));
+            }
+        };
+    }
+
+    private static String callTool(String workflowId) {
+        return RecordedCallWorkflow.queueFor(workflowId) + "/" + RecordedCallWorkflow.CALL_HANDLER;
+    }
+
+    @Test
+    void aCallWhoseNodeThePolicyBlocksIsRefusedBeforeTheModelRuns() throws Exception {
+        assumeExternalFn();
+        String workflowId = "it-blocked-" + UUID.randomUUID();
+        var modelCalls = new java.util.concurrent.atomic.AtomicInteger();
+        withTenantPolicy(Map.of("blocked_tools", List.of(callTool(workflowId))), () -> {
+            var props = props();
+            props.setWorkflowId(workflowId);
+            try (var advisor = new JamjetDurabilityAdvisor(new JamjetRuntimeClient(props), props)) {
+                var chat = ChatClient.builder(counting(modelCalls)).defaultAdvisors(advisor).build();
+                assertThatThrownBy(() -> chat.prompt("hi").call().content())
+                        .isInstanceOf(dev.jamjet.spring.JamjetGovernanceException.class)
+                        .hasMessageContaining("policy blocked");
+            }
+        });
+        assertThat(modelCalls).as("the model never ran").hasValue(0);
+        var client = new JamjetRuntimeClient(props());
+        var execution = findExecution(client, e -> workflowId.equals(e.workflowId()));
+        assertThat(settled(client, execution.executionId()).status()).isIn("failed", "cancelled");
+    }
+
+    @Test
+    void aCallWhoseNodeThePolicyHoldsForApprovalIsRefusedAndCancelled() throws Exception {
+        assumeExternalFn();
+        String workflowId = "it-held-" + UUID.randomUUID();
+        var modelCalls = new java.util.concurrent.atomic.AtomicInteger();
+        withTenantPolicy(Map.of("require_approval_for", List.of(callTool(workflowId))), () -> {
+            var props = props();
+            props.setWorkflowId(workflowId);
+            try (var advisor = new JamjetDurabilityAdvisor(new JamjetRuntimeClient(props), props)) {
+                var chat = ChatClient.builder(counting(modelCalls)).defaultAdvisors(advisor).build();
+                assertThatThrownBy(() -> chat.prompt("hi").call().content())
+                        .isInstanceOf(dev.jamjet.spring.JamjetGovernanceException.class)
+                        .hasMessageContaining("for approval");
+            }
+        });
+        assertThat(modelCalls).hasValue(0);
+        var client = new JamjetRuntimeClient(props());
+        var execution = findExecution(client, e -> workflowId.equals(e.workflowId()));
+        assertThat(settled(client, execution.executionId()).status()).isEqualTo("cancelled");
+    }
+
+    /**
+     * Calls from two instances start together under a policy that holds every
+     * one of their nodes. A claim can take the other call's node, so the gate's
+     * verdict for a call's node may land on another instance's claim; no call may
+     * run on that account.
+     */
+    @Test
+    void concurrentCallsWhoseNodesThePolicyHoldsAreAllRefused() throws Exception {
+        assumeExternalFn();
+        String workflowId = "it-held-concurrent-" + UUID.randomUUID();
+        var modelCalls = new java.util.concurrent.atomic.AtomicInteger();
+        withTenantPolicy(Map.of("require_approval_for", List.of(callTool(workflowId))), () -> {
+            var first = props();
+            first.setWorkflowId(workflowId);
+            var second = props();
+            second.setWorkflowId(workflowId);
+            second.setApiToken("second-instance");
+            ExecutorService pool = Executors.newFixedThreadPool(6);
+            try (var a = new JamjetDurabilityAdvisor(new JamjetRuntimeClient(first), first);
+                 var b = new JamjetDurabilityAdvisor(new JamjetRuntimeClient(second), second)) {
+                var chats = List.of(ChatClient.builder(counting(modelCalls)).defaultAdvisors(a).build(),
+                        ChatClient.builder(counting(modelCalls)).defaultAdvisors(b).build());
+                var start = new CountDownLatch(1);
+                var calls = new ArrayList<CompletableFuture<Throwable>>();
+                for (int i = 0; i < 6; i++) {
+                    var chat = chats.get(i % 2);
+                    calls.add(CompletableFuture.supplyAsync(() -> {
+                        try {
+                            start.await();
+                            chat.prompt("hi").call().content();
+                            return null;
+                        } catch (Throwable t) {
+                            return t;
+                        }
+                    }, pool));
+                }
+                start.countDown();
+                for (var call : calls) {
+                    assertThat(call.get(60, TimeUnit.SECONDS))
+                            .isInstanceOf(dev.jamjet.spring.JamjetGovernanceException.class);
+                }
+            } finally {
+                pool.shutdownNow();
+            }
+        });
+        assertThat(modelCalls).as("no call ran on a node the policy holds").hasValue(0);
+    }
+
+    /**
+     * The same, made deterministic: another instance's call started first, so the
+     * first claim takes its node, which the policy holds, and hands out nothing.
+     * Nothing has been recorded about this call's own node yet; the call must not
+     * take that as a go-ahead.
+     */
+    @Test
+    void aHoldOnAnotherCallsNodeIsNotTakenAsAGoAheadForThisCall() throws Exception {
+        assumeExternalFn();
+        String workflowId = "it-held-first-" + UUID.randomUUID();
+        var modelCalls = new java.util.concurrent.atomic.AtomicInteger();
+        var props = props();
+        props.setWorkflowId(workflowId);
+        var client = new JamjetRuntimeClient(props);
+        withTenantPolicy(Map.of("require_approval_for", List.of(callTool(workflowId))), () -> {
+            client.createWorkflow(JamjetDurabilityAdvisor.workflowIr(workflowId));
+            String other = client.startExecution(workflowId, RecordedCallWorkflow.VERSION,
+                    Map.of("session_id", "elsewhere")).executionId();
+            try (var advisor = new JamjetDurabilityAdvisor(client, props)) {
+                var chat = ChatClient.builder(counting(modelCalls)).defaultAdvisors(advisor).build();
+                assertThatThrownBy(() -> chat.prompt("hi").call().content())
+                        .isInstanceOf(dev.jamjet.spring.JamjetGovernanceException.class)
+                        .hasMessageContaining("for approval");
+            }
+            assertThat(client.listApprovals(other).pending()).as("the other call's node was held first").hasSize(1);
+        });
+        assertThat(modelCalls).as("the model never ran").hasValue(0);
+    }
+
+    /**
+     * A node claimed for a call that another instance runs (here, an execution
+     * started directly, whose node nobody claimed yet) is held, marked, and
+     * completed from that call's outcome event.
+     */
+    @Test
+    void aNodeClaimedForAnotherInstancesCallIsCompletedFromItsOutcome() throws Exception {
+        assumeExternalFn();
+        String workflowId = "it-foreign-" + UUID.randomUUID();
+        var props = props();
+        props.setWorkflowId(workflowId);
+        var client = new JamjetRuntimeClient(props);
+        client.createWorkflow(JamjetDurabilityAdvisor.workflowIr(workflowId));
+        String foreign = client.startExecution(workflowId, RecordedCallWorkflow.VERSION,
+                Map.of("session_id", "elsewhere")).executionId();
+
+        try (var advisor = new JamjetDurabilityAdvisor(client, props)) {
+            var chat = ChatClient.builder(answering("here")).defaultAdvisors(advisor).build();
+            assertThat(chat.prompt("hi").call().content()).isEqualTo("here");
+
+            assertThat(externalKeys(client.listEvents(foreign))).as("the holder marks the other call's execution")
+                    .contains(dev.jamjet.spring.client.RecordedCalls.HELD_EVENT);
+            assertThat(client.getExecution(foreign).status()).isEqualTo("running");
+
+            client.sendExternalEvent(foreign, JamjetDurabilityAdvisor.COMPLETED_EVENT,
+                    Map.of("status", "completed", "model", "elsewhere"));
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+            while (client.getExecution(foreign).isRunning() && System.nanoTime() < deadline) {
+                Thread.sleep(100);
+            }
+            assertThat(client.getExecution(foreign).status()).isEqualTo("completed");
+            assertThat(nodeEvent(client.listEvents(foreign), "node_completed", "chat").field("output"))
+                    .isEqualTo(Map.of("status", "completed", "model", "elsewhere"));
+        }
+    }
+
     /**
      * Why the workflow has an {@code external_fn} node: a runtime with it refuses
      * the {@code wait} workflow 0.2.x registered, since nothing executes a wait node.

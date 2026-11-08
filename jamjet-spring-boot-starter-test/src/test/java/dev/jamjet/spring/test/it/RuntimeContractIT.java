@@ -724,7 +724,7 @@ class RuntimeContractIT {
     }
 
     @Test
-    void theChatMemoryStorePersistsAndReadsBack() {
+    void theChatMemoryStorePersistsAndReadsBack() throws Exception {
         var client = new JamjetRuntimeClient(props());
         String memoryId = "it-memory-" + UUID.randomUUID();
         var messages = List.of(UserMessage.from("my name is Ada"), AiMessage.from("Hello Ada"));
@@ -740,8 +740,12 @@ class RuntimeContractIT {
         var memory = findExecution(client, e -> JamjetChatMemoryStore.WORKFLOW_ID.equals(e.workflowId())
                 && memoryId.equals(e.initialInput().get("memory_id")));
         if (holdsCalls(memory)) {
-            // Nothing claims the memory's node, so its execution stays open.
-            assertThat(client.getExecution(memory.executionId()).status()).isEqualTo("running");
+            // The store completes the memory's node when the memory is created, so
+            // the execution ends (the events stay the memory), and no memory piles
+            // up as a running execution.
+            assertThat(settled(client, memory.executionId()).status()).isEqualTo("completed");
+            assertThat(nodeEvent(client.listEvents(memory.executionId()), "node_completed", "memory").field("output"))
+                    .isEqualTo(Map.of("status", "recorded"));
         }
 
         reopened.deleteMessages(memoryId);

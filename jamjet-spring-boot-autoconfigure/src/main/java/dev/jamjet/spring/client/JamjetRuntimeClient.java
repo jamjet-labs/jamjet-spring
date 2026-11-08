@@ -432,8 +432,19 @@ public class JamjetRuntimeClient implements AutoCloseable {
         return url != null && url.endsWith("/") ? url.substring(0, url.length() - 1) : url;
     }
 
+    /**
+     * Closes the call recorders made with {@link RecordedCalls#shared} for this
+     * client (LangChain4j proxies and chat memory stores): they stop renewing
+     * leases after settling what they can. The HTTP client itself is managed by
+     * the JVM.
+     */
     @Override
     public void close() {
-        // HttpClient is managed by the JVM; the virtual-thread executor has no pool to drain.
+        if (recordedCalls == null) {
+            return;
+        }
+        for (RecordedCalls calls : recordedCalls.values()) {
+            calls.close();
+        }
     }
 }

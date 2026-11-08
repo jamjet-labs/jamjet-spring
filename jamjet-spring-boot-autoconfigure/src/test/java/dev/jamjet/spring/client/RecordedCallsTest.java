@@ -265,14 +265,94 @@ class RecordedCallsTest {
     }
 
     @Test
-    void aClosedRecorderRefusesToStartAndCancelsTheExecution() {
-        runtime.on("POST", "/executions/exec_1/cancel", 200, "{\"cancelled\":true}");
+    void aClosedRecorderRefusesToStart() {
         calls.close();
 
         assertThatThrownBy(() -> calls.start(Map.of()))
                 .isInstanceOfSatisfying(JamjetClientException.class, e -> assertThat(e.getMessage()).contains("closed"));
-        assertThat(posts("/executions/exec_1/cancel")).hasSize(1);
+        assertThat(posts("/executions")).as("no execution is started").isEmpty();
         assertThat(posts("/work-items/claim")).isEmpty();
+    }
+
+    @Test
+    void closeWaitsForAStartInProgress() throws Exception {
+        runtime.onSlow("POST", "/work-items/claim", 200, item("wi-1", "exec_1", 7), 400);
+        var start = java.util.concurrent.CompletableFuture.supplyAsync(() -> calls.start(Map.of()));
+        long deadline = System.nanoTime() + 5_000_000_000L;
+        while (runtime.count("POST", "/work-items/claim") == 0 && System.nanoTime() < deadline) {
+            Thread.sleep(10);
+        }
+
+        calls.close();
+
+        // Otherwise the start would take its node into an instance that no longer renews leases.
+        assertThat(start).as("close waited for the start in progress").isDone();
+        assertThat(start.get()).isEqualTo("exec_1");
+        assertThatThrownBy(() -> calls.start(Map.of())).isInstanceOf(JamjetClientException.class);
+    }
+
+    @Test
+    void anErrorInLeaseUpkeepDoesNotEndTheUpkeep() throws Exception {
+        var props = new JamjetProperties();
+        props.setRuntimeUrl(runtime.url());
+        var beats = new AtomicInteger();
+        var client = new JamjetRuntimeClient(props) {
+            @Override
+            public dev.jamjet.spring.client.model.WorkItemHeartbeat heartbeatWorkItem(String id, String worker,
+                                                                                      long fence, Duration timeout) {
+                if (beats.incrementAndGet() == 1) {
+                    throw new Error("boom");
+                }
+                return new dev.jamjet.spring.client.model.WorkItemHeartbeat(true, fence, false, false);
+            }
+        };
+        try (var recorder = new RecordedCalls(client, RecordedCalls.Spec.call("spring-ai-chat", "chat",
+                "spring_ai.completed", "n", "test")).manualUpkeep()) {
+            claimsAnswer(item("wi-1", "exec_1", 7));
+            recorder.start(Map.of());
+
+            // A scheduled task that throws is never run again, so nothing may escape a round.
+            recorder.sweep(Instant.now().plusSeconds(21));
+            recorder.sweep(Instant.now().plusSeconds(42));
+            assertThat(beats).as("the next round renewed the lease").hasValue(2);
+            assertThat(recorder.heldExecutions()).containsExactly("exec_1");
+        }
+    }
+
+    @Test
+    void closingTheClientClosesItsSharedRecorders() {
+        var props = new JamjetProperties();
+        props.setRuntimeUrl(runtime.url());
+        var client = new JamjetRuntimeClient(props);
+        var shared = RecordedCalls.shared(client,
+                RecordedCalls.Spec.call("spring-ai-chat", "chat", "spring_ai.completed", "n", "test"));
+        assertThat(RecordedCalls.shared(client, shared.spec())).isSameAs(shared);
+
+        client.close();
+
+        assertThatThrownBy(() -> shared.start(Map.of()))
+                .isInstanceOfSatisfying(JamjetClientException.class, e -> assertThat(e.getMessage()).contains("closed"));
+    }
+
+    @Test
+    void aCallThatNeverFinishesIsForgottenAfterUnreportedAfter() {
+        var props = new JamjetProperties();
+        props.setRuntimeUrl(runtime.url());
+        try (var recorder = new RecordedCalls(new JamjetRuntimeClient(props),
+                RecordedCalls.Spec.call("spring-ai-chat", "chat", "spring_ai.completed", "n", "test"),
+                RecordedCalls.DEFAULT_LEASE, Duration.ofMinutes(5), Duration.ofMillis(400)).manualUpkeep()) {
+            // Another instance holds the node, so nothing here would ever renew or release it.
+            claimsAnswer();
+            eventsOfExec1("{\"type\":\"external_event_received\",\"correlation_key\":\"" + RecordedCalls.HELD_EVENT
+                    + "\",\"payload\":{}}");
+            recorder.start(Map.of());
+            assertThat(recorder.runningExecutions()).containsExactly("exec_1");
+
+            recorder.sweep(Instant.now().plus(Duration.ofMinutes(4)));
+            assertThat(recorder.runningExecutions()).containsExactly("exec_1");
+            recorder.sweep(Instant.now().plus(Duration.ofMinutes(6)));
+            assertThat(recorder.runningExecutions()).as("its thread died without finishing").isEmpty();
+        }
     }
 
     @Test
@@ -346,6 +426,47 @@ class RecordedCallsTest {
         assertThat(body(posts("/executions").get(0)).get("workflow_version").asText()).isEqualTo("1.0.0");
         assertThat(runtime.requests()).noneMatch(r -> r.path().startsWith("/work-items"));
         assertThat(calls.registeredVersion()).isEqualTo("1.0.0");
+    }
+
+    private void registrationsAnswer(int... statuses) {
+        var n = new AtomicInteger();
+        java.util.function.IntConsumer answer = status -> runtime.on("POST", "/workflows", status, switch (status) {
+            case 201 -> "{\"workflow_id\":\"spring-ai-chat\",\"version\":\"x\"}";
+            case 400 -> "{\"error\":\"invalid workflow IR: unknown variant `external_fn`, expected one of `wait`\"}";
+            default -> "{\"error\":\"backend unavailable\"}";
+        });
+        answer.accept(statuses[0]);
+        runtime.whenReceived("POST", "/workflows", () -> answer.accept(statuses[Math.min(n.getAndIncrement(),
+                statuses.length - 1)]));
+    }
+
+    @Test
+    void aRuntimeUpgradedInPlaceGetsTheCurrentWorkflowOnTheNextCall() throws Exception {
+        // v2 refused (0.5.x), legacy registered; then the runtime is upgraded.
+        registrationsAnswer(400, 201, 201);
+        claimsAnswer(item("wi-1", "exec_1", 7));
+
+        calls.start(Map.of());
+        assertThat(calls.registeredVersion()).isEqualTo("1.0.0");
+        assertThat(posts("/work-items/claim")).isEmpty();
+
+        calls.start(Map.of());
+        assertThat(calls.registeredVersion()).isEqualTo("2.0.0");
+        assertThat(body(posts("/workflows").get(2)).at("/ir/version").asText()).isEqualTo("2.0.0");
+        assertThat(body(posts("/executions").get(1)).get("workflow_version").asText()).isEqualTo("2.0.0");
+        assertThat(posts("/work-items/claim")).as("the node is claimed, so its policy applies").hasSize(1);
+    }
+
+    @Test
+    void aLegacyCallWhoseProbeFailsOtherwiseIsNotStartedUnderTheLegacyWorkflow() {
+        registrationsAnswer(400, 201, 503);
+
+        calls.start(Map.of());
+        assertThat(calls.registeredVersion()).isEqualTo("1.0.0");
+
+        assertThatThrownBy(() -> calls.start(Map.of()))
+                .isInstanceOfSatisfying(JamjetClientException.class, e -> assertThat(e.getStatusCode()).isEqualTo(503));
+        assertThat(posts("/executions")).as("only the first call started").hasSize(1);
     }
 
     @Test

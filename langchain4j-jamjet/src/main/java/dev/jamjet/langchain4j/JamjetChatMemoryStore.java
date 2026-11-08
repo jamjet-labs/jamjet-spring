@@ -124,7 +124,8 @@ public class JamjetChatMemoryStore implements ChatMemoryStore {
         this.missTtl = missTtl == null ? DEFAULT_MISS_TTL : missTtl;
         this.executions = lru(maxCachedIds);
         this.misses = lru(maxCachedIds);
-        this.memories = new RecordedCalls(client, spec());
+        // Shared per client, so closing the client closes it.
+        this.memories = RecordedCalls.shared(client, spec());
         for (int i = 0; i < locks.length; i++) {
             locks[i] = new Object();
         }

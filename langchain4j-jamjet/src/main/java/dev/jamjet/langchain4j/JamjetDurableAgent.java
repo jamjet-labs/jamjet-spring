@@ -91,7 +91,8 @@ public final class JamjetDurableAgent {
             this.client = client;
             this.mode = mode;
             this.recordContent = recordContent;
-            // Shared by every proxy on this runtime, so many wraps do not mean many threads.
+            // Shared by every proxy on this client, so many wraps do not mean many
+            // threads; closing the client closes it.
             this.calls = RecordedCalls.shared(client, spec());
         }
 

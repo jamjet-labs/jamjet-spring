@@ -58,8 +58,8 @@ import java.util.concurrent.TimeUnit;
  * {@value RecordedCallWorkflow#LEGACY_VERSION} {@code wait} workflow is registered
  * instead, nothing is claimed, and {@link #finish} does nothing: that runtime
  * completes the node as soon as the execution starts, and the record is the
- * execution's events. The current workflow is tried again every 15 minutes, so
- * a runtime upgraded in place is picked up.
+ * execution's events. The current workflow is tried again on every call, so a
+ * runtime upgraded in place is picked up at once.
  *
  * <p>Thread-safe. While it holds a node it runs one daemon thread that renews
  * the leases; the thread stops when nothing is held, and {@link #close} stops it.
@@ -86,7 +86,6 @@ public class RecordedCalls implements AutoCloseable {
     private static final Duration TICK = Duration.ofSeconds(1);
     private static final Duration RECHECK = Duration.ofSeconds(2);
     private static final Duration RECHECK_SLOW = Duration.ofSeconds(10);
-    private static final Duration REPROBE = Duration.ofMinutes(15);
     private static final Duration DRAIN = Duration.ofSeconds(5);
 
     /**
@@ -130,10 +129,17 @@ public class RecordedCalls implements AutoCloseable {
 
     private final Object registrationLock = new Object();
     private volatile String registeredVersion;
-    private volatile Instant legacySince;
-    private final java.util.concurrent.atomic.AtomicBoolean reprobing = new java.util.concurrent.atomic.AtomicBoolean();
 
-    private final Set<String> running = ConcurrentHashMap.newKeySet();
+    /** Calls running here, with when each started. */
+    private final ConcurrentHashMap<String, Instant> running = new ConcurrentHashMap<>();
+
+    /**
+     * Held for reading by every {@link #start} and for writing by {@link #close},
+     * so close never runs in the middle of a start (which could take a node into
+     * a closed instance that no longer renews it).
+     */
+    private final java.util.concurrent.locks.ReentrantReadWriteLock lifecycle =
+            new java.util.concurrent.locks.ReentrantReadWriteLock();
     private final ConcurrentHashMap<String, Held> held = new ConcurrentHashMap<>();
 
     private ScheduledExecutorService sweeper; // guarded by this
@@ -214,45 +220,49 @@ public class RecordedCalls implements AutoCloseable {
         return registeredVersion;
     }
 
-    /** Registers the workflow unless this instance already did; returns the version registered. */
+    /**
+     * Registers the workflow; returns the version to start under. While this
+     * instance records with the {@value RecordedCallWorkflow#LEGACY_VERSION}
+     * workflow, every call tries the current one again first, so a runtime
+     * upgraded in place gets claim-time policy from its next call on. Only the
+     * runtime's explicit "unknown variant `external_fn`" keeps the legacy
+     * workflow; any other refusal is the caller's error.
+     */
     public String register() {
         String version = registeredVersion;
+        if (RecordedCallWorkflow.VERSION.equals(version)) {
+            return version;
+        }
         if (version != null) {
-            Instant since = legacySince;
-            if (since != null && !Instant.now().isBefore(since.plus(REPROBE)) && reprobing.compareAndSet(false, true)) {
-                // One call tries the current workflow again; the others keep the legacy one meanwhile.
-                try {
-                    client.createWorkflow(spec.ir());
-                    log.info("The JamJet runtime now knows external_fn nodes; {} is recorded as v{} from now on",
-                            spec.workflowId(), RecordedCallWorkflow.VERSION);
-                    legacySince = null;
-                    registeredVersion = RecordedCallWorkflow.VERSION;
-                } catch (JamjetClientException e) {
-                    legacySince = Instant.now();
-                } finally {
-                    reprobing.set(false);
+            try {
+                client.createWorkflow(spec.ir());
+            } catch (JamjetClientException e) {
+                if (predatesExternalFn(e)) {
+                    return RecordedCallWorkflow.LEGACY_VERSION;
                 }
+                throw e;
             }
-            return registeredVersion;
+            log.info("The JamJet runtime now knows external_fn nodes; {} is recorded as v{} from now on",
+                    spec.workflowId(), RecordedCallWorkflow.VERSION);
+            registeredVersion = RecordedCallWorkflow.VERSION;
+            return RecordedCallWorkflow.VERSION;
         }
         synchronized (registrationLock) {
             if (registeredVersion == null) {
                 try {
                     client.createWorkflow(spec.ir());
                     registeredVersion = RecordedCallWorkflow.VERSION;
-                    legacySince = null;
                 } catch (JamjetClientException e) {
                     if (!predatesExternalFn(e)) {
                         throw e;
                     }
                     log.warn("The JamJet runtime does not know external_fn nodes (it predates them, as 0.5.x does), "
                                     + "so {} is registered as v{} with a wait node, which that runtime completes as "
-                                    + "soon as an execution starts: each call is recorded by its events only. Upgrade "
-                                    + "the runtime to hold each call's execution open until the call ends.",
-                            spec.workflowId(), RecordedCallWorkflow.LEGACY_VERSION);
+                                    + "soon as an execution starts: each call is recorded by its events only, with "
+                                    + "no claim-time policy. Upgrade the runtime to hold each call's execution open "
+                                    + "until the call ends.", spec.workflowId(), RecordedCallWorkflow.LEGACY_VERSION);
                     client.createWorkflow(spec.legacyIr());
                     registeredVersion = RecordedCallWorkflow.LEGACY_VERSION;
-                    legacySince = Instant.now();
                 }
             }
             return registeredVersion;
@@ -277,6 +287,20 @@ public class RecordedCalls implements AutoCloseable {
      * @throws JamjetGovernanceException when the runtime blocked the call's node or holds it for approval
      */
     public String start(Map<String, Object> input) {
+        lifecycle.readLock().lock();
+        try {
+            if (closed) {
+                throw new JamjetClientException("the call recorder for " + spec.workflowId() + " is closed",
+                        "/executions");
+            }
+            pruneRunning(Instant.now());
+            return startOpen(input);
+        } finally {
+            lifecycle.readLock().unlock();
+        }
+    }
+
+    private String startOpen(Map<String, Object> input) {
         String version = register();
         StartExecutionResponse started;
         try {
@@ -290,7 +314,6 @@ public class RecordedCalls implements AutoCloseable {
             log.info("Runtime does not know workflow {}; registering it again", spec.workflowId());
             synchronized (registrationLock) {
                 registeredVersion = null;
-                legacySince = null;
             }
             version = register();
             started = client.startExecution(spec.workflowId(), version, input);
@@ -302,13 +325,8 @@ public class RecordedCalls implements AutoCloseable {
         if (!RecordedCallWorkflow.VERSION.equals(version)) {
             return executionId;
         }
-        if (closed) {
-            cancelQuietly(executionId);
-            throw new JamjetClientException("the call recorder for " + spec.workflowId() + " is closed, so it "
-                    + "cannot hold the node of execution " + executionId, "/work-items/claim");
-        }
         if (spec.startOutcome() == null) {
-            running.add(executionId);
+            running.put(executionId, Instant.now());
             RUNNING_HERE.put(keyPrefix + executionId, this);
         }
         try {
@@ -367,6 +385,27 @@ public class RecordedCalls implements AutoCloseable {
         return Set.copyOf(held.keySet());
     }
 
+    /** Executions of calls running here (for tests and metrics). */
+    Set<String> runningExecutions() {
+        return Set.copyOf(running.keySet());
+    }
+
+    /**
+     * Forget calls that started more than {@code unreportedAfter} ago and never
+     * finished (their thread died without reporting). A call whose node this
+     * instance holds is released by the sweeper; this covers one whose node is
+     * held elsewhere, which the sweeper never sees.
+     */
+    private void pruneRunning(Instant now) {
+        for (var e : running.entrySet()) {
+            if (now.isAfter(e.getValue().plus(unreportedAfter)) && running.remove(e.getKey(), e.getValue())) {
+                RUNNING_HERE.remove(keyPrefix + e.getKey(), this);
+                log.warn("Execution {}: the call has run for more than {} without finishing; it is no longer tracked",
+                        e.getKey(), unreportedAfter);
+            }
+        }
+    }
+
     /**
      * Stops renewing leases. For a few seconds first, nodes held for calls in
      * other instances are settled as their outcomes arrive; any node still held
@@ -374,8 +413,22 @@ public class RecordedCalls implements AutoCloseable {
      */
     @Override
     public void close() {
-        closed = true;
-        for (String executionId : running) {
+        // Wait for starts in progress (each is bounded by the claim wait), so none
+        // takes a node into this instance after its leases stop being renewed.
+        boolean exclusive = false;
+        try {
+            exclusive = lifecycle.writeLock().tryLock(claimWait.plusSeconds(5).toMillis(), TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        try {
+            closed = true;
+        } finally {
+            if (exclusive) {
+                lifecycle.writeLock().unlock();
+            }
+        }
+        for (String executionId : running.keySet()) {
             RUNNING_HERE.remove(keyPrefix + executionId, this);
         }
         synchronized (this) {
@@ -389,7 +442,7 @@ public class RecordedCalls implements AutoCloseable {
             boolean waiting = false;
             for (Held h : held.values()) {
                 String executionId = h.item.executionId();
-                if (running.contains(executionId)) {
+                if (running.containsKey(executionId)) {
                     continue;
                 }
                 try {
@@ -501,7 +554,7 @@ public class RecordedCalls implements AutoCloseable {
         RecordedCalls target = owner != null && !owner.closed ? owner : this;
         target.held.put(item.executionId(), new Held(item, workerId, lease));
         target.ensureSweeper();
-        if (target == this && !running.contains(item.executionId())) {
+        if (target == this && !running.containsKey(item.executionId())) {
             log.debug("Holding the node of execution {}, a call this instance does not run, until its {} event",
                     item.executionId(), spec.completedEvent());
             markHeld(item);
@@ -647,7 +700,13 @@ public class RecordedCalls implements AutoCloseable {
     }
 
     private void sweep() {
-        sweep(Instant.now());
+        try {
+            sweep(Instant.now());
+        } catch (Throwable t) {
+            // A scheduled task that throws is never run again, and every lease it
+            // keeps would lapse. Log and carry on with the next round.
+            log.error("Lease upkeep round failed; continuing with the next one", t);
+        }
     }
 
     /**
@@ -655,6 +714,7 @@ public class RecordedCalls implements AutoCloseable {
      * virtual thread, so one slow request cannot make the other leases lapse.
      */
     void sweep(Instant now) {
+        pruneRunning(now);
         List<Held> all = new ArrayList<>(held.values());
         if (all.size() == 1) {
             upkeep(all.get(0), now);
@@ -679,7 +739,7 @@ public class RecordedCalls implements AutoCloseable {
                         executionId);
                 return;
             }
-            if (running.contains(executionId) && now.isAfter(h.claimedAt.plus(unreportedAfter))) {
+            if (running.containsKey(executionId) && now.isAfter(h.claimedAt.plus(unreportedAfter))) {
                 // A call that never finished (its thread died without reporting):
                 // stop renewing, so the lease lapses and the runtime fails it.
                 release(executionId);
@@ -707,7 +767,7 @@ public class RecordedCalls implements AutoCloseable {
                 return;
             }
             Duration every = now.isAfter(h.claimedAt.plusSeconds(60)) ? RECHECK_SLOW : RECHECK;
-            if (!running.contains(executionId) && now.isAfter(h.checkedAt.plus(every))) {
+            if (!running.containsKey(executionId) && now.isAfter(h.checkedAt.plus(every))) {
                 h.checkedAt = now;
                 Map<String, Object> reported = reportedOutcome(executionId);
                 if (reported != null) {
@@ -729,7 +789,7 @@ public class RecordedCalls implements AutoCloseable {
             } else {
                 log.debug("Execution {}: lease upkeep failed, retrying: {}", executionId, e.getMessage());
             }
-        } catch (RuntimeException e) {
+        } catch (RuntimeException | Error e) {
             log.warn("Execution {}: unexpected failure keeping its node's lease", executionId, e);
         }
     }

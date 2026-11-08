@@ -59,17 +59,21 @@ jobs:
         run: mvn -B -Dgpg.skip -Dmaven.javadoc.skip=true -Pit -pl jamjet-spring-boot-starter-test -am verify
 
   runtime-integration-main:
-    name: Integration tests against a runtime built from jamjet main
+    name: Integration tests against a runtime built from jamjet main (pinned)
     runs-on: ubuntu-latest
     # No published image has jamjet PR #169 (registration refuses node kinds
     # nothing executes, such as the wait node 0.2.x registered) or #178 yet, so
-    # this job builds jamjet-server from main and runs the same tests against it.
+    # this job builds jamjet-server from a pinned jamjet main commit and runs the
+    # same tests against it. Move the pin on purpose, in its own change, when the
+    # runtime changes the work-item protocol.
+    env:
+      JAMJET_RUNTIME_REF: 989b97b051716400b54ab29233fb24e5aed4e5f2 # jamjet main, 2026-11-08 (#180)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: jamjet-labs/jamjet
-          ref: main
+          ref: ${{ env.JAMJET_RUNTIME_REF }}
           path: jamjet-runtime
           persist-credentials: false
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -81,7 +85,8 @@ jobs:
           CARGO_INCREMENTAL: "0"
           CARGO_PROFILE_DEV_DEBUG: "0"
         run: |
-          echo "jamjet main at $(git rev-parse HEAD)"
+          echo "jamjet at $(git rev-parse HEAD)"
+          test "$(git rev-parse HEAD)" = "$JAMJET_RUNTIME_REF"
           # The server embeds the web UI; an empty page is enough for the API.
           mkdir -p ../web/dist && echo '<!DOCTYPE html><html><body></body></html>' > ../web/dist/index.html
           cargo build --locked -p jamjet-api --bin jamjet-server

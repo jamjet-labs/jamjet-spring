@@ -109,7 +109,7 @@ public final class RecordedCallWorkflow {
     /**
      * The queue a workflow's recorded calls go to: {@code <workflowId>.calls}, or,
      * when the workflow id has characters a queue name cannot hold or is too long,
-     * {@code recorded-calls.} and a digest of the id. The runtime accepts at most
+     * {@code recorded-calls.} and the first 32 hex characters of the id's SHA-256. The runtime accepts at most
      * {@value #MAX_QUEUE_LENGTH} ASCII letters, digits, {@code -}, {@code _} and
      * {@code .}, and no built-in queue name; a {@code .calls} suffix is never one.
      */

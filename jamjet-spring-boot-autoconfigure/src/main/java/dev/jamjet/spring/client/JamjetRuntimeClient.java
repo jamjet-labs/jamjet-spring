@@ -133,8 +133,13 @@ public class JamjetRuntimeClient implements AutoCloseable {
 
     /** {@code POST /executions/{id}/cancel}. */
     public void cancelExecution(String executionId) {
+        cancelExecution(executionId, null);
+    }
+
+    /** {@link #cancelExecution(String)} with a read timeout for this request. */
+    public void cancelExecution(String executionId, Duration timeout) {
         post("/executions/" + segment(executionId) + "/cancel", Map.of(),
-                new TypeReference<Map<String, Object>>() {});
+                mapper.getTypeFactory().constructType(new TypeReference<Map<String, Object>>() {}), timeout);
     }
 
     /** {@code GET /executions/{id}/events}: the execution's event log, in sequence order. */
@@ -159,9 +164,15 @@ public class JamjetRuntimeClient implements AutoCloseable {
      */
     public void sendExternalEvent(String executionId, String correlationKey,
                                   Map<String, Object> payload) {
+        sendExternalEvent(executionId, correlationKey, payload, null);
+    }
+
+    /** {@link #sendExternalEvent(String, String, Map)} with a read timeout for this request. */
+    public void sendExternalEvent(String executionId, String correlationKey, Map<String, Object> payload,
+                                  Duration timeout) {
         post("/executions/" + segment(executionId) + "/external-event",
                 Map.of("correlation_key", correlationKey, "payload", payload == null ? Map.of() : payload),
-                new TypeReference<Map<String, Object>>() {});
+                mapper.getTypeFactory().constructType(new TypeReference<Map<String, Object>>() {}), timeout);
     }
 
     // ── Work items (worker protocol) ──────────────────────────────────────────
@@ -195,6 +206,12 @@ public class JamjetRuntimeClient implements AutoCloseable {
      */
     public void completeWorkItem(String workItemId, Map<String, Object> output, long durationMs,
                                  long leaseFence, String idempotencyKey) {
+        completeWorkItem(workItemId, output, durationMs, leaseFence, idempotencyKey, null);
+    }
+
+    /** {@link #completeWorkItem(String, Map, long, long, String)} with a read timeout for this request. */
+    public void completeWorkItem(String workItemId, Map<String, Object> output, long durationMs,
+                                 long leaseFence, String idempotencyKey, Duration timeout) {
         var body = new java.util.LinkedHashMap<String, Object>();
         body.put("output", output == null ? Map.of() : output);
         body.put("state_patch", Map.of());
@@ -204,7 +221,7 @@ public class JamjetRuntimeClient implements AutoCloseable {
             body.put("idempotency_key", idempotencyKey);
         }
         post("/work-items/" + segment(workItemId) + "/complete", body,
-                new TypeReference<Map<String, Object>>() {});
+                mapper.getTypeFactory().constructType(new TypeReference<Map<String, Object>>() {}), timeout);
     }
 
     /**
@@ -212,11 +229,16 @@ public class JamjetRuntimeClient implements AutoCloseable {
      * The runtime retries the node while it has attempts left, then fails it.
      */
     public void failWorkItem(String workItemId, String error, long leaseFence) {
+        failWorkItem(workItemId, error, leaseFence, null);
+    }
+
+    /** {@link #failWorkItem(String, String, long)} with a read timeout for this request. */
+    public void failWorkItem(String workItemId, String error, long leaseFence, Duration timeout) {
         var body = new java.util.LinkedHashMap<String, Object>();
         body.put("error", error == null ? "failed" : error);
         body.put("lease_fence", leaseFence);
         post("/work-items/" + segment(workItemId) + "/fail", body,
-                new TypeReference<Map<String, Object>>() {});
+                mapper.getTypeFactory().constructType(new TypeReference<Map<String, Object>>() {}), timeout);
     }
 
     /** {@code POST /work-items/{id}/heartbeat} with body {@code {worker_id, lease_fence}}: renews the lease. */

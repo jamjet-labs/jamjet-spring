@@ -230,6 +230,28 @@ class StubRuntimeClient extends JamjetRuntimeClient {
     }
 
     @Override
+    public void sendExternalEvent(String executionId, String correlationKey, Map<String, Object> payload,
+                                  java.time.Duration timeout) {
+        sendExternalEvent(executionId, correlationKey, payload);
+    }
+
+    @Override
+    public void completeWorkItem(String workItemId, Map<String, Object> output, long durationMs, long leaseFence,
+                                 String idempotencyKey, java.time.Duration timeout) {
+        completeWorkItem(workItemId, output, durationMs, leaseFence, idempotencyKey);
+    }
+
+    @Override
+    public void failWorkItem(String workItemId, String error, long leaseFence, java.time.Duration timeout) {
+        failWorkItem(workItemId, error, leaseFence);
+    }
+
+    @Override
+    public void cancelExecution(String executionId, java.time.Duration timeout) {
+        cancelExecution(executionId);
+    }
+
+    @Override
     public void cancelExecution(String executionId) {
         checkUp("/executions/" + executionId + "/cancel");
         statuses.put(executionId, "cancelled");

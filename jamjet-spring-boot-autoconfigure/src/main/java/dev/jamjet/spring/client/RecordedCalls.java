@@ -131,6 +131,7 @@ public class RecordedCalls implements AutoCloseable {
     private final Object registrationLock = new Object();
     private volatile String registeredVersion;
     private volatile Instant legacySince;
+    private final java.util.concurrent.atomic.AtomicBoolean reprobing = new java.util.concurrent.atomic.AtomicBoolean();
 
     private final Set<String> running = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<String, Held> held = new ConcurrentHashMap<>();
@@ -193,6 +194,10 @@ public class RecordedCalls implements AutoCloseable {
      * client, and its thread only runs while it holds a node.
      */
     public static RecordedCalls shared(JamjetRuntimeClient client, Spec spec) {
+        if (client.recordedCalls == null) {
+            // A mocked or otherwise uninitialized client.
+            return new RecordedCalls(client, spec);
+        }
         return client.recordedCalls.computeIfAbsent(spec.workflowId(), k -> new RecordedCalls(client, spec));
     }
 
@@ -212,28 +217,31 @@ public class RecordedCalls implements AutoCloseable {
     /** Registers the workflow unless this instance already did; returns the version registered. */
     public String register() {
         String version = registeredVersion;
-        Instant since = legacySince;
-        if (version != null && (since == null || Instant.now().isBefore(since.plus(REPROBE)))) {
-            return version;
-        }
-        synchronized (registrationLock) {
-            boolean reprobe = RecordedCallWorkflow.LEGACY_VERSION.equals(registeredVersion)
-                    && legacySince != null && !Instant.now().isBefore(legacySince.plus(REPROBE));
-            if (registeredVersion == null || reprobe) {
+        if (version != null) {
+            Instant since = legacySince;
+            if (since != null && !Instant.now().isBefore(since.plus(REPROBE)) && reprobing.compareAndSet(false, true)) {
+                // One call tries the current workflow again; the others keep the legacy one meanwhile.
                 try {
                     client.createWorkflow(spec.ir());
-                    if (reprobe) {
-                        log.info("The JamJet runtime now knows external_fn nodes; {} is recorded as v{} from now on",
-                                spec.workflowId(), RecordedCallWorkflow.VERSION);
-                    }
+                    log.info("The JamJet runtime now knows external_fn nodes; {} is recorded as v{} from now on",
+                            spec.workflowId(), RecordedCallWorkflow.VERSION);
+                    legacySince = null;
+                    registeredVersion = RecordedCallWorkflow.VERSION;
+                } catch (JamjetClientException e) {
+                    legacySince = Instant.now();
+                } finally {
+                    reprobing.set(false);
+                }
+            }
+            return registeredVersion;
+        }
+        synchronized (registrationLock) {
+            if (registeredVersion == null) {
+                try {
+                    client.createWorkflow(spec.ir());
                     registeredVersion = RecordedCallWorkflow.VERSION;
                     legacySince = null;
                 } catch (JamjetClientException e) {
-                    if (reprobe) {
-                        // Keep recording with the legacy workflow and try again later.
-                        legacySince = Instant.now();
-                        return registeredVersion;
-                    }
                     if (!predatesExternalFn(e)) {
                         throw e;
                     }
@@ -294,15 +302,32 @@ public class RecordedCalls implements AutoCloseable {
         if (!RecordedCallWorkflow.VERSION.equals(version)) {
             return executionId;
         }
+        if (closed) {
+            cancelQuietly(executionId);
+            throw new JamjetClientException("the call recorder for " + spec.workflowId() + " is closed, so it "
+                    + "cannot hold the node of execution " + executionId, "/work-items/claim");
+        }
         if (spec.startOutcome() == null) {
             running.add(executionId);
             RUNNING_HERE.put(keyPrefix + executionId, this);
         }
         try {
             awaitNode(executionId);
+        } catch (JamjetGovernanceException refused) {
+            // The runtime ended the execution itself (a block), or it was cancelled
+            // on the way out (an approval hold).
+            release(executionId);
+            throw refused;
         } catch (RuntimeException e) {
             release(executionId);
-            cancelQuietly(executionId);
+            boolean interrupted = Thread.interrupted();
+            try {
+                cancelQuietly(executionId);
+            } finally {
+                if (interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+            }
             throw e;
         }
         return executionId;
@@ -398,16 +423,34 @@ public class RecordedCalls implements AutoCloseable {
     private void awaitNode(String executionId) {
         Instant deadline = Instant.now().plus(claimWait);
         long pauseMillis = 25;
+        int transientFailures = 0;
         while (true) {
             if (held.containsKey(executionId)) {
                 return;
             }
-            ClaimedWorkItem item = client.claimWorkItem(workerId, List.of(spec.queue()), lease, requestTimeout());
+            ClaimedWorkItem item;
+            try {
+                item = client.claimWorkItem(workerId, List.of(spec.queue()), lease, requestTimeout());
+            } catch (JamjetClientException e) {
+                // A 5xx or a dropped connection: a retry only claims the next item.
+                boolean transientFailure = e.isServerError()
+                        || (e.getStatusCode() == -1 && e.getCause() instanceof java.io.IOException);
+                if (!transientFailure || ++transientFailures > 2 || !Instant.now().isBefore(deadline)
+                        || !pause(100L * transientFailures)) {
+                    throw e;
+                }
+                continue;
+            }
             if (item != null) {
                 boolean mine = executionId.equals(item.executionId());
-                take(item);
+                take(item, mine);
                 if (mine) {
                     return;
+                }
+                if (!Instant.now().isBefore(deadline)) {
+                    throw new JamjetClientException("the runtime did not hand out the node of execution "
+                            + executionId + " within " + claimWait + " (claims kept handing out other calls' nodes)",
+                            "/work-items/claim");
                 }
                 continue;
             }
@@ -419,10 +462,13 @@ public class RecordedCalls implements AutoCloseable {
                 case BLOCKED, ENDED -> throw new JamjetGovernanceException("JamJet runtime refused this call: "
                         + "it ended execution " + executionId + " before the call ran"
                         + (state.reason() == null ? "" : ": " + state.reason()), null);
-                case AWAITING_APPROVAL -> throw new JamjetGovernanceException("JamJet runtime refused this call: "
-                        + "it holds node " + spec.nodeId() + " of execution " + executionId
-                        + " for approval under its policy, and this application does not wait for approvals the "
-                        + "runtime holds; the execution was cancelled", null);
+                case AWAITING_APPROVAL -> {
+                    cancelQuietly(executionId);
+                    throw new JamjetGovernanceException("JamJet runtime refused this call: it holds node "
+                            + spec.nodeId() + " of execution " + executionId + " for approval under its policy, and "
+                            + "this application does not wait for approvals the runtime holds; the execution was "
+                            + "cancelled", null);
+                }
                 case UNDECIDED -> {
                     if (!Instant.now().isBefore(deadline)) {
                         throw new JamjetClientException("the runtime did not hand out the node of execution "
@@ -439,9 +485,15 @@ public class RecordedCalls implements AutoCloseable {
         }
     }
 
-    /** A claimed item: settled at once for a record that outlives calls, otherwise held for its call. */
-    private void take(ClaimedWorkItem item) {
+    /**
+     * A claimed item: settled at once for a record that outlives calls, otherwise
+     * held for its call. {@code mine}: the item of the execution this start waits for.
+     */
+    private void take(ClaimedWorkItem item, boolean mine) {
         if (spec.startOutcome() != null) {
+            if (!mine) {
+                markHeld(item);
+            }
             settle(new Held(item, workerId, lease), spec.startOutcome());
             return;
         }
@@ -450,18 +502,22 @@ public class RecordedCalls implements AutoCloseable {
         target.held.put(item.executionId(), new Held(item, workerId, lease));
         target.ensureSweeper();
         if (target == this && !running.contains(item.executionId())) {
-            // Tell the call's owner its node was handed out, so it can go ahead.
             log.debug("Holding the node of execution {}, a call this instance does not run, until its {} event",
                     item.executionId(), spec.completedEvent());
-            try {
-                var payload = new LinkedHashMap<String, Object>();
-                payload.put("worker_id", workerId);
-                payload.put("work_item_id", item.id());
-                client.sendExternalEvent(item.executionId(), HELD_EVENT, payload);
-            } catch (JamjetClientException e) {
-                log.warn("Execution {}: could not record that this instance holds its node ({}); its call will "
-                        + "time out waiting for it", item.executionId(), e.getMessage());
-            }
+            markHeld(item);
+        }
+    }
+
+    /** Tell the owner of another execution that its node was handed out, so its call can go ahead. */
+    private void markHeld(ClaimedWorkItem item) {
+        try {
+            var payload = new LinkedHashMap<String, Object>();
+            payload.put("worker_id", workerId);
+            payload.put("work_item_id", item.id());
+            client.sendExternalEvent(item.executionId(), HELD_EVENT, payload, requestTimeout());
+        } catch (JamjetClientException e) {
+            log.warn("Execution {}: could not record that this instance holds its node ({}); its call will "
+                    + "time out waiting for it", item.executionId(), e.getMessage());
         }
     }
 
@@ -513,7 +569,7 @@ public class RecordedCalls implements AutoCloseable {
 
     private void cancelQuietly(String executionId) {
         try {
-            client.cancelExecution(executionId);
+            client.cancelExecution(executionId, requestTimeout());
         } catch (JamjetClientException e) {
             log.warn("Could not cancel execution {}: {}", executionId, e.getMessage());
         }
@@ -547,10 +603,11 @@ public class RecordedCalls implements AutoCloseable {
         try {
             if ("failed".equals(outcome.get("status"))) {
                 Object error = outcome.get("error");
-                client.failWorkItem(h.item.id(), error == null ? "the call failed" : String.valueOf(error), h.fence);
+                client.failWorkItem(h.item.id(), error == null ? "the call failed" : String.valueOf(error), h.fence,
+                        requestTimeout());
             } else {
                 client.completeWorkItem(h.item.id(), outcome, Duration.between(h.claimedAt, Instant.now()).toMillis(),
-                        h.fence, h.item.idempotencyKey());
+                        h.fence, h.item.idempotencyKey(), requestTimeout());
             }
         } catch (JamjetClientException e) {
             if (e.isClientError()) {

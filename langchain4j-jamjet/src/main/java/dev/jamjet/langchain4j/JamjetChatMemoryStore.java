@@ -259,7 +259,9 @@ public class JamjetChatMemoryStore implements ChatMemoryStore {
         for (int offset = 0; ; offset += PAGE) {
             List<ExecutionState> page = client.listExecutions(null, PAGE, offset);
             for (ExecutionState e : page) {
+                // A cancelled or failed execution is not a memory (the runtime refused it).
                 if (WORKFLOW_ID.equals(e.workflowId()) && e.initialInput() != null
+                        && !"cancelled".equalsIgnoreCase(e.status()) && !"failed".equalsIgnoreCase(e.status())
                         && namespace.equals(e.initialInput().get("namespace"))
                         && memoryId.equals(e.initialInput().get("memory_id"))) {
                     if (best == null || (e.startedAt() != null

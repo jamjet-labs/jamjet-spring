@@ -246,6 +246,33 @@ class RecordedCallsTest {
                 .isInstanceOf(JamjetGovernanceException.class)
                 .hasMessageContaining("ended execution exec_1 before the call ran")
                 .hasMessageContaining("policy blocked");
+        assertThat(posts("/executions/exec_1/cancel")).as("the runtime failed it; it stays failed").isEmpty();
+    }
+
+    @Test
+    void aTransientClaimFailureIsRetried() throws Exception {
+        var n = new AtomicInteger();
+        runtime.on("POST", "/work-items/claim", 503, "{\"error\":\"busy\"}");
+        runtime.whenReceived("POST", "/work-items/claim", () -> {
+            if (n.incrementAndGet() == 2) {
+                runtime.on("POST", "/work-items/claim", 200, item("wi-1", "exec_1", 7));
+            }
+        });
+
+        assertThat(calls.start(Map.of())).isEqualTo("exec_1");
+        assertThat(calls.heldExecutions()).containsExactly("exec_1");
+        assertThat(posts("/work-items/claim")).hasSize(2);
+    }
+
+    @Test
+    void aClosedRecorderRefusesToStartAndCancelsTheExecution() {
+        runtime.on("POST", "/executions/exec_1/cancel", 200, "{\"cancelled\":true}");
+        calls.close();
+
+        assertThatThrownBy(() -> calls.start(Map.of()))
+                .isInstanceOfSatisfying(JamjetClientException.class, e -> assertThat(e.getMessage()).contains("closed"));
+        assertThat(posts("/executions/exec_1/cancel")).hasSize(1);
+        assertThat(posts("/work-items/claim")).isEmpty();
     }
 
     @Test

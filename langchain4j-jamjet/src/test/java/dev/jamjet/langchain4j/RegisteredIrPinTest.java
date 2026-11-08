@@ -30,15 +30,29 @@ class RegisteredIrPinTest {
 
     @Test
     void durableAgentIrIsPinnedToItsVersion() throws Exception {
-        assertThat(RecordedCallWorkflow.VERSION).isEqualTo("1.0.0");
+        assertThat(RecordedCallWorkflow.VERSION).isEqualTo("2.0.0");
         assertThat(hash(JamjetDurableAgent.workflowIr())).as(bump(JamjetDurableAgent.WORKFLOW_ID))
-                .isEqualTo("fbaa55e8016f01e6072f6ae4a97c4607403bd82911c4ffa54f2dd768a3cee552");
+                .isEqualTo("627e85f30e47122771cf31f2c5e3fb172fe2ccbc5e9249aacafbf67bad0f271d");
     }
 
     @Test
     void chatMemoryIrIsPinnedToItsVersion() throws Exception {
-        assertThat(RecordedCallWorkflow.VERSION).isEqualTo("1.0.0");
+        assertThat(RecordedCallWorkflow.VERSION).isEqualTo("2.0.0");
         assertThat(hash(JamjetChatMemoryStore.workflowIr())).as(bump(JamjetChatMemoryStore.WORKFLOW_ID))
+                .isEqualTo("988e96ee1b93eddc1b8adab4b053e2cabc34d6670975f9483fb52f23785187a1");
+    }
+
+    /**
+     * The 1.0.0 IRs are what 0.2.x registered. A 0.5.x runtime that holds them
+     * re-registers them only if they are byte for byte the same, so these hashes
+     * never change.
+     */
+    @Test
+    void legacyIrsAreUnchanged() throws Exception {
+        assertThat(RecordedCallWorkflow.LEGACY_VERSION).isEqualTo("1.0.0");
+        assertThat(hash(JamjetDurableAgent.legacyWorkflowIr()))
+                .isEqualTo("fbaa55e8016f01e6072f6ae4a97c4607403bd82911c4ffa54f2dd768a3cee552");
+        assertThat(hash(JamjetChatMemoryStore.legacyWorkflowIr()))
                 .isEqualTo("d6f75c51f7efe4891ef1ee74023cb9d25430f396b9d77f1321c09aff3b71b833");
     }
 }

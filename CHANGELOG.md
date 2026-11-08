@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.0 (unreleased)
+
+### Runtime compatibility
+
+- A JamJet runtime built after jamjet PR #169 refuses a workflow with a node kind nothing executes, and nothing executes a `wait` node. 0.2.x registered its recorded-call workflows (`spring-ai-chat`, `langchain4j-durable-agent`, `langchain4j-chat-memory`) with one `wait` node, so on such a runtime every advised call fails closed with `400 invalid workflow IR`. They are now registered as v2.0.0 with one `external_fn` node on a queue of the application's own (`<workflow-id>.calls`; `langchain4j-chat-memory.memory` for chat memory).
+- The durability advisor and the LangChain4j durable agent claim that node's work item when the call starts, renew the lease while it runs, and complete it with the call's outcome when it ends (or fail it, when the call failed), echoing `lease_fence` and `idempotency_key`. The execution is `running` while the call runs and `completed` or `failed` after it; on 0.5.x it was completed as soon as it started. The node does not retry, so an application that stops mid-call leaves a failed execution, not an open one. The `spring_ai.completed` and `langchain4j.completed` events are recorded as before.
+- Calls that start at the same time can claim each other's node (a claim hands out the oldest item on the queue). A node claimed for a call in the same JVM goes to that call; one claimed for a call in another instance is held and completed from that call's outcome event, or failed if none arrives within an hour (for the advisor, at least `spring.jamjet.approval.timeout` plus 30 minutes).
+- If the runtime blocks the call's node under its policy, or holds it for approval, the call is refused before the model runs with `JamjetGovernanceException`, also with `on-runtime-error=fail-open`.
+- On a runtime without `external_fn` nodes (0.5.x) the v1.0.0 `wait` workflows are registered instead, unchanged, with a warning. `RecordedCallWorkflow.VERSION` is now `2.0.0`; `LEGACY_VERSION` is `1.0.0`.
+- New client methods for the work-item protocol: `claimWorkItem`, `completeWorkItem`, `failWorkItem`, `heartbeatWorkItem`.
+- CI runs the integration tests against a runtime built from jamjet `main` as well as against the `jamjetdev/jamjet:0.5.0` image.
+
 ## 0.2.1 (unreleased)
 
 The first release of the JamJet modules since 0.1.0, and a fix release for the Engram modules. Every module is 0.2.1. There is no 0.2.0 of `jamjet-spring-boot-starter`, `jamjet-spring-boot-autoconfigure`, `jamjet-spring-boot-starter-test` or `langchain4j-jamjet`: the parent and the Engram modules were published as 0.2.0 on 2026-04-12, and Maven Central does not accept a version twice.

@@ -73,7 +73,11 @@ A call whose model asks for tools is still one execution. Spring AI 2.0 runs the
 
 **Upgrading from 0.2.x:** the durability advisor used to run late in the chain and now runs early, at `HIGHEST_PRECEDENCE + 250`. Two things follow. The execution's `input` is the request before advisors ordered after it changed it, for example a RAG `QuestionAnswerAdvisor` at order 0 (the audit advisor's `spring_ai.prompt` event and the approval digest are taken later and do include those changes). And your own advisors ordered after `HIGHEST_PRECEDENCE + 300` run once per tool round, not once per call.
 
-The model call runs in your JVM. The runtime holds the record: the workflow's single node is a `wait` on the `spring_ai.completed` event, which the advisor sends when the call ends. The runtime does not re-run or replay Spring AI calls.
+The model call runs in your JVM. The runtime holds the record. The workflow (`spring-ai-chat` v2.0.0) has one `external_fn` node on the `spring-ai-chat.calls` queue (`<workflow-id>.calls`). When a call starts, the advisor starts an execution and claims that node's work item from the queue, keeps the lease renewed while the call runs, and when the call ends sends the `spring_ai.completed` event and completes the node with the same outcome (or fails it, if the call failed). So the execution is `running` while the call runs and `completed` or `failed` after it, and if your application stops mid-call the lease lapses and the runtime fails the execution. The runtime does not re-run or replay Spring AI calls.
+
+A claim hands out the oldest item on the queue, so two calls that start at the same time, in one instance or in two, can each claim the other's node. That is expected: a node claimed for a call in the same JVM goes straight to that call, and a node claimed for a call in another instance is held until that call's `spring_ai.completed` event appears and then completed with it. If a tenant policy blocks the node or holds it for approval on the runtime, the call is refused before the model runs, whatever `on-runtime-error` says.
+
+On a runtime without `external_fn` nodes (0.5.x, including the `jamjetdev/jamjet:0.5.0` image) the advisor registers `spring-ai-chat` v1.0.0 with a `wait` node instead and logs a warning once. That runtime completes the node as soon as the execution starts, so there the events are the whole record. A runtime built from jamjet `main` after PR #169 refuses the `wait` workflow that 0.2.x registers, because nothing executes a `wait` node.
 
 ## When the runtime is unavailable
 
@@ -217,7 +221,7 @@ What changed for this starter between Spring AI 1.0 and 2.0:
 - Java 21+
 - Spring Boot 4.1+ (the 0.2.x line: Spring Boot 3.4+)
 - Spring AI 2.0+ (the 0.2.x line: Spring AI 1.0)
-- JamJet runtime 0.5.0+ (Docker image `jamjetdev/jamjet` or the `jamjet-server` binary)
+- JamJet runtime 0.5.0+ (Docker image `jamjetdev/jamjet` or the `jamjet-server` binary). On 0.5.x each call is recorded by its events only (see [What gets recorded](#what-gets-recorded)). A runtime that refuses node kinds nothing executes (jamjet PR #169 and later) needs this version: it refuses the workflow 0.2.x registers.
 
 ## Testing (`jamjet-spring-boot-starter-test`)
 
@@ -303,7 +307,7 @@ Span names you build this way: `jamjet.execution`, `jamjet.node.{id}`, `jamjet.t
 </dependency>
 ```
 
-**Recorded AI services**: wrap any `AiServices` proxy. Each method call starts an execution of the `langchain4j-durable-agent` workflow and records a `langchain4j.completed` event with the result or the error:
+**Recorded AI services**: wrap any `AiServices` proxy. Each method call starts an execution of the `langchain4j-durable-agent` workflow and records a `langchain4j.completed` event with the result or the error. The call holds the execution's node (queue `langchain4j-durable-agent.calls`) the same way the Spring AI advisor does, so the execution ends `completed` or `failed` with the call:
 
 ```java
 var jamjet = new JamjetConfig().runtimeUrl("http://localhost:7700");
@@ -316,7 +320,7 @@ MyAssistant recorded = jamjet.wrap(raw, MyAssistant.class);
 
 Arguments and results are recorded by default. `new JamjetConfig().recordContent(false)` records only the method, the argument count, the outcome and, on failure, the exception type.
 
-**Chat memory on the runtime**: each (namespace, memory id) is one execution of the `langchain4j-chat-memory` workflow; every update appends the full message list as a `chat_memory` event and reads take the latest one. Set the namespace to your application's name, so two applications on one runtime tenant do not read each other's memory under the same id (LangChain4j's default id is `"default"`):
+**Chat memory on the runtime**: each (namespace, memory id) is one execution of the `langchain4j-chat-memory` workflow; every update appends the full message list as a `chat_memory` event and reads take the latest one. Nothing claims the memory workflow's node (queue `langchain4j-chat-memory.memory`), so a memory's execution stays `running` while the memory exists. Set the namespace to your application's name, so two applications on one runtime tenant do not read each other's memory under the same id (LangChain4j's default id is `"default"`):
 
 ```java
 var jamjet = new JamjetConfig()

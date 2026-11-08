@@ -11,12 +11,14 @@ import dev.jamjet.spring.client.model.ApprovalDecision;
 import dev.jamjet.spring.client.model.ApprovalsView;
 import dev.jamjet.spring.client.model.ApproveResponse;
 import dev.jamjet.spring.client.model.AuditPage;
+import dev.jamjet.spring.client.model.ClaimedWorkItem;
 import dev.jamjet.spring.client.model.CreateWorkflowRequest;
 import dev.jamjet.spring.client.model.CreateWorkflowResponse;
 import dev.jamjet.spring.client.model.ExecutionEvent;
 import dev.jamjet.spring.client.model.ExecutionState;
 import dev.jamjet.spring.client.model.StartExecutionRequest;
 import dev.jamjet.spring.client.model.StartExecutionResponse;
+import dev.jamjet.spring.client.model.WorkItemHeartbeat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -149,6 +151,84 @@ public class JamjetRuntimeClient implements AutoCloseable {
         post("/executions/" + segment(executionId) + "/external-event",
                 Map.of("correlation_key", correlationKey, "payload", payload == null ? Map.of() : payload),
                 new TypeReference<Map<String, Object>>() {});
+    }
+
+    // ── Work items (worker protocol) ──────────────────────────────────────────
+
+    /**
+     * {@code POST /work-items/claim} with body {@code {worker_id, queue_types, lease_secs}}.
+     * Returns the claimed item, or null when the runtime hands out nothing (an
+     * empty queue looks the same as an item the runtime withheld under its policy).
+     */
+    public ClaimedWorkItem claimWorkItem(String workerId, List<String> queueTypes, Duration lease) {
+        var body = new java.util.LinkedHashMap<String, Object>();
+        body.put("worker_id", workerId);
+        body.put("queue_types", queueTypes);
+        if (lease != null) {
+            body.put("lease_secs", Math.max(1, lease.toSeconds()));
+        }
+        var result = post("/work-items/claim", body, ClaimResponse.class);
+        return result != null && result.claimed() ? result.workItem() : null;
+    }
+
+    /**
+     * {@code POST /work-items/{id}/complete} with body
+     * {@code {output, state_patch, duration_ms, lease_fence, idempotency_key}}.
+     * A lease that is no longer held (or an execution that already ended) is a 409.
+     */
+    public void completeWorkItem(String workItemId, Map<String, Object> output, long durationMs,
+                                 long leaseFence, String idempotencyKey) {
+        var body = new java.util.LinkedHashMap<String, Object>();
+        body.put("output", output == null ? Map.of() : output);
+        body.put("state_patch", Map.of());
+        body.put("duration_ms", Math.max(0, durationMs));
+        body.put("lease_fence", leaseFence);
+        if (idempotencyKey != null) {
+            body.put("idempotency_key", idempotencyKey);
+        }
+        post("/work-items/" + segment(workItemId) + "/complete", body,
+                new TypeReference<Map<String, Object>>() {});
+    }
+
+    /**
+     * {@code POST /work-items/{id}/fail} with body {@code {error, lease_fence}}.
+     * The runtime retries the node while it has attempts left, then fails it.
+     */
+    public void failWorkItem(String workItemId, String error, long leaseFence) {
+        var body = new java.util.LinkedHashMap<String, Object>();
+        body.put("error", error == null ? "failed" : error);
+        body.put("lease_fence", leaseFence);
+        post("/work-items/" + segment(workItemId) + "/fail", body,
+                new TypeReference<Map<String, Object>>() {});
+    }
+
+    /** {@code POST /work-items/{id}/heartbeat} with body {@code {worker_id, lease_fence}}: renews the lease. */
+    public WorkItemHeartbeat heartbeatWorkItem(String workItemId, String workerId, long leaseFence) {
+        return post("/work-items/" + segment(workItemId) + "/heartbeat",
+                Map.of("worker_id", workerId, "lease_fence", leaseFence), WorkItemHeartbeat.class);
+    }
+
+    @com.fasterxml.jackson.annotation.JsonIgnoreProperties(ignoreUnknown = true)
+    record ClaimResponse(
+            @com.fasterxml.jackson.annotation.JsonProperty("claimed") boolean claimed,
+            @com.fasterxml.jackson.annotation.JsonProperty("work_item") ClaimedWorkItem workItem) {
+    }
+
+    /**
+     * Who this client talks to: the runtime URL and a digest of its token, so
+     * two clients for the same runtime and tenant share one key and a client
+     * for another tenant does not.
+     */
+    String endpointKey() {
+        String token = properties.getApiToken() == null ? "" : properties.getApiToken();
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(token.getBytes(StandardCharsets.UTF_8));
+            return stripTrailingSlash(properties.getRuntimeUrl()) + "#"
+                    + java.util.HexFormat.of().formatHex(digest, 0, 8);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     // ── Audit ──────────────────────────────────────────────────────────────────

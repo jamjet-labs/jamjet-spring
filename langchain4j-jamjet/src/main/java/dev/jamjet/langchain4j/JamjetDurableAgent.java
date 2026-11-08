@@ -3,8 +3,7 @@ package dev.jamjet.langchain4j;
 import dev.jamjet.spring.RuntimeErrorMode;
 import dev.jamjet.spring.client.JamjetClientException;
 import dev.jamjet.spring.client.JamjetRuntimeClient;
-import dev.jamjet.spring.client.RecordedCallWorkflow;
-import dev.jamjet.spring.client.model.StartExecutionResponse;
+import dev.jamjet.spring.client.RecordedCalls;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -20,8 +19,10 @@ import java.util.Map;
 /**
  * Wraps a LangChain4j AI service so every method call is recorded as an
  * execution on the JamJet runtime: the {@code langchain4j-durable-agent}
- * workflow is registered once, each call starts an execution of it, and a
- * {@code langchain4j.completed} external event records the outcome.
+ * workflow is registered once, each call starts an execution of it and claims
+ * its node, and a {@code langchain4j.completed} external event records the
+ * outcome, which then completes (or, for a failed call, fails) the node. See
+ * {@link RecordedCalls}.
  *
  * <p>The call itself runs in this JVM; the runtime holds the record. By default
  * a call the runtime cannot record is refused
@@ -62,9 +63,17 @@ public final class JamjetDurableAgent {
                         recordContent));
     }
 
-    static Map<String, Object> workflowIr() {
-        return RecordedCallWorkflow.ir(WORKFLOW_ID, "invoke", COMPLETED_EVENT,
+    static RecordedCalls.Spec spec() {
+        return RecordedCalls.Spec.call(WORKFLOW_ID, "invoke", COMPLETED_EVENT,
                 "LangChain4j AI service call", "langchain4j-jamjet");
+    }
+
+    static Map<String, Object> workflowIr() {
+        return spec().ir();
+    }
+
+    static Map<String, Object> legacyWorkflowIr() {
+        return spec().legacyIr();
     }
 
     private static class DurabilityHandler<T> implements InvocationHandler {
@@ -75,13 +84,14 @@ public final class JamjetDurableAgent {
         private final JamjetRuntimeClient client;
         private final RuntimeErrorMode mode;
         private final boolean recordContent;
-        private volatile boolean registered;
+        private final RecordedCalls calls;
 
         DurabilityHandler(T delegate, JamjetRuntimeClient client, RuntimeErrorMode mode, boolean recordContent) {
             this.delegate = delegate;
             this.client = client;
             this.mode = mode;
             this.recordContent = recordContent;
+            this.calls = new RecordedCalls(client, spec());
         }
 
         @Override
@@ -90,9 +100,8 @@ public final class JamjetDurableAgent {
                 return method.invoke(delegate, args);
             }
 
-            String executionId = null;
+            String executionId;
             try {
-                ensureRegistered();
                 var input = new LinkedHashMap<String, Object>();
                 input.put("interface", method.getDeclaringClass().getName());
                 input.put("method", method.getName());
@@ -101,22 +110,10 @@ public final class JamjetDurableAgent {
                 } else {
                     input.put("arg_count", args != null ? args.length : 0);
                 }
-                StartExecutionResponse started;
-                try {
-                    started = client.startExecution(WORKFLOW_ID, RecordedCallWorkflow.VERSION, input);
-                } catch (JamjetClientException e) {
-                    if (e.getStatusCode() != 404) {
-                        throw e;
-                    }
-                    // The runtime forgot the workflow (store reset): register again, retry once.
-                    registered = false;
-                    ensureRegistered();
-                    started = client.startExecution(WORKFLOW_ID, RecordedCallWorkflow.VERSION, input);
-                }
-                executionId = started != null ? started.executionId() : null;
-                if (executionId == null || executionId.isBlank()) {
-                    throw new JamjetClientException("the runtime returned no execution_id", "/executions");
-                }
+                // Registers the workflow (again if the runtime forgot it), starts an
+                // execution and claims its node. A runtime that refuses the call under
+                // its policy throws JamjetGovernanceException, whatever the mode.
+                executionId = calls.start(input);
             } catch (JamjetClientException e) {
                 Failures.handle(mode, log, "start an execution for " + method.getName(), e);
                 return invokeDelegate(method, args);
@@ -135,37 +132,31 @@ public final class JamjetDurableAgent {
             return result;
         }
 
-        private void ensureRegistered() {
-            if (!registered) {
-                synchronized (this) {
-                    if (!registered) {
-                        client.createWorkflow(workflowIr());
-                        registered = true;
-                    }
-                }
-            }
-        }
-
         /** After the call returned: a failure here is a recording failure, never a refusal. */
         private void record(String executionId, Map<String, Object> outcome) {
             try {
                 client.sendExternalEvent(executionId, COMPLETED_EVENT, outcome);
             } catch (JamjetClientException e) {
+                calls.finish(executionId, outcome);
                 if (mode == RuntimeErrorMode.FAIL_OPEN) {
                     log.warn("The call completed but its outcome could not be recorded: {}", e.getMessage());
                     return;
                 }
                 throw Failures.recordingFailure("record the outcome of execution " + executionId, e);
             }
+            calls.finish(executionId, outcome);
         }
 
         /** The call threw: keep its error, attach a recording failure as suppressed. */
         private void recordFailure(String executionId, Throwable callError) {
+            String error = recordContent && callError.getMessage() != null
+                    ? callError.getMessage() : callError.getClass().getSimpleName();
+            Map<String, Object> failure = Map.of("status", "failed", "error", error);
             try {
-                String error = recordContent && callError.getMessage() != null
-                        ? callError.getMessage() : callError.getClass().getSimpleName();
-                client.sendExternalEvent(executionId, COMPLETED_EVENT, Map.of("status", "failed", "error", error));
+                client.sendExternalEvent(executionId, COMPLETED_EVENT, failure);
+                calls.finish(executionId, failure);
             } catch (JamjetClientException e) {
+                calls.finish(executionId, failure);
                 if (mode == RuntimeErrorMode.FAIL_OPEN) {
                     log.warn("Could not record the failure of execution {}: {}", executionId, e.getMessage());
                 } else {

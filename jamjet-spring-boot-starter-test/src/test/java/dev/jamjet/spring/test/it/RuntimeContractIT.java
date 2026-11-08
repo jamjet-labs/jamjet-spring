@@ -11,7 +11,9 @@ import dev.jamjet.spring.advisor.JamjetDurabilityAdvisor;
 import dev.jamjet.spring.approval.ApprovalWaitRegistry;
 import dev.jamjet.spring.approval.JamjetApprovalController;
 import dev.jamjet.spring.approval.ReviewDecision;
+import dev.jamjet.spring.client.JamjetClientException;
 import dev.jamjet.spring.client.JamjetRuntimeClient;
+import dev.jamjet.spring.client.RecordedCallWorkflow;
 import dev.jamjet.spring.client.model.ApprovalDecision;
 import dev.jamjet.spring.client.model.ExecutionEvent;
 import dev.jamjet.spring.client.model.ExecutionState;
@@ -36,11 +38,16 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.ArrayList;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
@@ -51,6 +58,12 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * <p>Every assertion is on a side effect read back from the runtime, never on
  * the absence of an exception: the advisors' old failure was exactly that they
  * threw nothing and recorded nothing.
+ *
+ * <p>A runtime with {@code external_fn} nodes records each call under workflow
+ * version {@value RecordedCallWorkflow#VERSION}; JamJet 0.5.x, which predates
+ * them, under {@value RecordedCallWorkflow#LEGACY_VERSION}. Set
+ * {@code JAMJET_IT_EXPECT_VERSION} to the version the runtime under test must
+ * get, so CI cannot pass by falling back on the wrong runtime.
  */
 class RuntimeContractIT {
 
@@ -84,6 +97,41 @@ class RuntimeContractIT {
         props.setRuntimeUrl(runtimeUrl);
         props.getApproval().setTimeout("30s");
         return props;
+    }
+
+    /**
+     * Version the runtime under test records calls under, asserted against
+     * {@code JAMJET_IT_EXPECT_VERSION} when that is set.
+     */
+    private static String recordedVersion(ExecutionState execution) {
+        String expected = System.getenv("JAMJET_IT_EXPECT_VERSION");
+        if (expected != null && !expected.isBlank()) {
+            assertThat(execution.workflowVersion()).as("the version this runtime records calls under")
+                    .isEqualTo(expected);
+        }
+        assertThat(execution.workflowVersion())
+                .isIn(RecordedCallWorkflow.VERSION, RecordedCallWorkflow.LEGACY_VERSION);
+        return execution.workflowVersion();
+    }
+
+    private static boolean holdsCalls(ExecutionState execution) {
+        return RecordedCallWorkflow.VERSION.equals(recordedVersion(execution));
+    }
+
+    /** Read the execution until it leaves {@code running} or the deadline passes. */
+    private static ExecutionState settled(JamjetRuntimeClient client, String executionId) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        ExecutionState state = client.getExecution(executionId);
+        while (state.isRunning() && System.nanoTime() < deadline) {
+            Thread.sleep(50);
+            state = client.getExecution(executionId);
+        }
+        return state;
+    }
+
+    private static ExecutionEvent nodeEvent(List<ExecutionEvent> events, String type, String nodeId) {
+        return events.stream().filter(e -> type.equals(e.type()) && nodeId.equals(e.nodeId())).findFirst()
+                .orElseThrow(() -> new AssertionError("no " + type + " event for node " + nodeId));
     }
 
     private static ChatModel answering(String text) {
@@ -126,7 +174,7 @@ class RuntimeContractIT {
     }
 
     @Test
-    void anAdvisedChatClientCallCreatesAnExecutionWithEvents() {
+    void anAdvisedChatClientCallCreatesAnExecutionWithEvents() throws Exception {
         var props = props();
         var client = new JamjetRuntimeClient(props);
         var chat = ChatClient.builder(answering("forty-two"))
@@ -142,7 +190,7 @@ class RuntimeContractIT {
         var execution = findExecution(client, e -> session.equals(
                 e.initialInput() == null ? null : e.initialInput().get("session_id")));
         assertThat(execution.workflowId()).isEqualTo("spring-ai-chat");
-        assertThat(execution.workflowVersion()).isEqualTo("1.0.0");
+        recordedVersion(execution);
 
         var events = client.listEvents(execution.executionId());
         assertThat(events).extracting(ExecutionEvent::type).contains("workflow_started", "node_scheduled");
@@ -152,12 +200,178 @@ class RuntimeContractIT {
         assertThat(external(events, "spring_ai.response").payload()).containsEntry("content", "forty-two");
         assertThat(external(events, "spring_ai.completed").payload()).containsEntry("status", "completed");
 
+        if (holdsCalls(execution)) {
+            // The call's node was claimed by the advisor and completed with the
+            // call's outcome, so the execution ended when the call did.
+            assertThat(settled(client, execution.executionId()).status()).isEqualTo("completed");
+            assertThat(nodeEvent(client.listEvents(execution.executionId()), "node_completed", "chat")
+                    .field("output")).isEqualTo(Map.of("status", "completed"));
+        }
+
         // A second application instance registers the same, constant IR: the
         // runtime treats it as a no-op and the call is recorded as before.
         var restarted = ChatClient.builder(answering("again"))
                 .defaultAdvisors(new JamjetDurabilityAdvisor(new JamjetRuntimeClient(props), props))
                 .build();
         assertThat(restarted.prompt("hi").call().content()).isEqualTo("again");
+    }
+
+    @Test
+    void theExecutionRunsExactlyAsLongAsTheCall() throws Exception {
+        var props = props();
+        var client = new JamjetRuntimeClient(props);
+        var modelEntered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        ChatModel slow = new ChatModel() {
+            @Override
+            public ChatResponse call(Prompt prompt) {
+                modelEntered.countDown();
+                try {
+                    release.await(20, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                return new ChatResponse(List.of(new Generation(new AssistantMessage("done"))));
+            }
+        };
+        String session = "it-running-" + UUID.randomUUID();
+        try (var advisor = new JamjetDurabilityAdvisor(client, props)) {
+            var chat = ChatClient.builder(slow).defaultAdvisors(advisor).build();
+            var call = CompletableFuture.supplyAsync(() -> chat.prompt("take your time")
+                    .advisors(a -> a.param(JamjetDurabilityAdvisor.SESSION_ID_KEY, session)).call().content());
+            assertThat(modelEntered.await(20, TimeUnit.SECONDS)).as("the model was called").isTrue();
+
+            var execution = findExecution(client, e -> session.equals(
+                    e.initialInput() == null ? null : e.initialInput().get("session_id")));
+            boolean holds = holdsCalls(execution);
+            if (holds) {
+                // Held by the advisor while the model runs: not completed early.
+                Thread.sleep(300);
+                assertThat(client.getExecution(execution.executionId()).status()).isEqualTo("running");
+            }
+            release.countDown();
+            assertThat(call.get(20, TimeUnit.SECONDS)).isEqualTo("done");
+            if (holds) {
+                assertThat(settled(client, execution.executionId()).status()).isEqualTo("completed");
+            }
+        }
+    }
+
+    @Test
+    void aFailedCallFailsItsExecution() throws Exception {
+        var props = props();
+        var client = new JamjetRuntimeClient(props);
+        ChatModel broken = new ChatModel() {
+            @Override
+            public ChatResponse call(Prompt prompt) {
+                throw new IllegalStateException("model unavailable");
+            }
+        };
+        String session = "it-failed-" + UUID.randomUUID();
+        try (var advisor = new JamjetDurabilityAdvisor(client, props)) {
+            var chat = ChatClient.builder(broken).defaultAdvisors(advisor).build();
+            assertThatThrownBy(() -> chat.prompt("hi")
+                    .advisors(a -> a.param(JamjetDurabilityAdvisor.SESSION_ID_KEY, session)).call().content())
+                    .hasMessageContaining("model unavailable");
+        }
+        var execution = findExecution(client, e -> session.equals(
+                e.initialInput() == null ? null : e.initialInput().get("session_id")));
+        assertThat(external(client.listEvents(execution.executionId()), "spring_ai.completed").payload())
+                .containsEntry("status", "failed");
+        if (holdsCalls(execution)) {
+            assertThat(settled(client, execution.executionId()).status()).isEqualTo("failed");
+            assertThat((String) nodeEvent(client.listEvents(execution.executionId()), "node_failed", "chat")
+                    .field("error")).contains("model unavailable");
+        }
+    }
+
+    /**
+     * Two instances of one application (two runtime clients that do not share
+     * this JVM's routing, as two processes would not) start calls at the same
+     * time. A claim takes the oldest node on the queue, so each instance claims
+     * nodes of the other's calls and settles them from the outcome event; every
+     * execution must still end completed.
+     */
+    @Test
+    void concurrentCallsFromTwoInstancesAllEndCompleted() throws Exception {
+        // Dev mode ignores the token; a different one keeps the two clients from
+        // handing nodes to each other inside this JVM.
+        concurrentCalls("second-instance");
+    }
+
+    /** As above, with both advisors in one JVM on the same runtime and token: nodes are handed over directly. */
+    @Test
+    void concurrentCallsFromTwoAdvisorsInOneJvmAllEndCompleted() throws Exception {
+        concurrentCalls(null);
+    }
+
+    private void concurrentCalls(String otherToken) throws Exception {
+        var base = props();
+        var other = props();
+        other.setApiToken(otherToken);
+        String marker = "it-concurrent-" + UUID.randomUUID();
+        int perInstance = 6;
+        ExecutorService pool = Executors.newFixedThreadPool(2 * perInstance);
+        try (var a = new JamjetDurabilityAdvisor(new JamjetRuntimeClient(base), base);
+             var b = new JamjetDurabilityAdvisor(new JamjetRuntimeClient(other), other)) {
+            var chats = List.of(ChatClient.builder(answering("ok")).defaultAdvisors(a).build(),
+                    ChatClient.builder(answering("ok")).defaultAdvisors(b).build());
+            var start = new CountDownLatch(1);
+            var calls = new ArrayList<CompletableFuture<String>>();
+            for (int i = 0; i < 2 * perInstance; i++) {
+                var chat = chats.get(i % 2);
+                String session = marker + "-" + i;
+                calls.add(CompletableFuture.supplyAsync(() -> {
+                    try {
+                        start.await();
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    return chat.prompt("hi").advisors(p -> p.param(JamjetDurabilityAdvisor.SESSION_ID_KEY, session))
+                            .call().content();
+                }, pool));
+            }
+            start.countDown();
+            for (var call : calls) {
+                assertThat(call.get(30, TimeUnit.SECONDS)).isEqualTo("ok");
+            }
+            var client = new JamjetRuntimeClient(base);
+            for (int i = 0; i < 2 * perInstance; i++) {
+                String session = marker + "-" + i;
+                var execution = findExecution(client, e -> session.equals(
+                        e.initialInput() == null ? null : e.initialInput().get("session_id")));
+                if (holdsCalls(execution)) {
+                    assertThat(settled(client, execution.executionId()).status())
+                            .as("execution of call %d", i).isEqualTo("completed");
+                }
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    /**
+     * Why the workflow has an {@code external_fn} node: a runtime with it refuses
+     * the {@code wait} workflow 0.2.x registered, since nothing executes a wait node.
+     */
+    @Test
+    void aRuntimeWithExternalFnRefusesTheWaitNodeWorkflow() {
+        var client = new JamjetRuntimeClient(props());
+        String workflowId = "it-wait-" + UUID.randomUUID();
+        String version;
+        try {
+            version = client.createWorkflow(JamjetDurabilityAdvisor.workflowIr(workflowId)).version();
+        } catch (JamjetClientException e) {
+            assumeTrue(!e.getRuntimeMessage().contains("unknown variant `external_fn`"),
+                    "this runtime predates external_fn nodes (0.5.x) and accepts the wait node");
+            throw e;
+        }
+        assertThat(version).isEqualTo(RecordedCallWorkflow.VERSION);
+        assertThatThrownBy(() -> client.createWorkflow(JamjetDurabilityAdvisor.legacyWorkflowIr(workflowId)))
+                .isInstanceOfSatisfying(JamjetClientException.class, e -> {
+                    assertThat(e.getStatusCode()).isEqualTo(400);
+                    assertThat(e.getRuntimeMessage()).contains("cannot execute node(s) 'chat' (wait)");
+                });
     }
 
     @Test
@@ -215,6 +429,11 @@ class RuntimeContractIT {
                 .containsEntry("decision", "approved").containsEntry("approver", "alice")
                 .containsEntry("authenticated", true).containsEntry("content_digest", digest)
                 .containsEntry("initiator", "requester");
+        var execution = client.getExecution(executionId);
+        if (holdsCalls(execution)) {
+            // The node was held through the approval wait and completed after the call.
+            assertThat(settled(client, executionId).status()).isEqualTo("completed");
+        }
     }
 
     @Test
@@ -226,7 +445,8 @@ class RuntimeContractIT {
 
         // A workflow the runtime gates itself: an agent tool dispatch node whose
         // policy requires approval for send_wire. Claiming it makes the runtime
-        // record a pending approval bound to the exact calls.
+        // record a pending approval bound to the exact calls. The runtime accepts
+        // the dispatch marker only on the ADK dispatcher's coordinates.
         String workflowId = "it-gated-" + UUID.randomUUID();
         var ir = new java.util.LinkedHashMap<String, Object>();
         ir.put("workflow_id", workflowId);
@@ -234,7 +454,7 @@ class RuntimeContractIT {
         ir.put("state_schema", "");
         ir.put("start_node", "dispatch");
         ir.put("nodes", Map.of("dispatch", Map.of("id", "dispatch", "kind", Map.of(
-                "type", "java_fn", "class_name", "it.Tools", "method", "dispatch",
+                "type", "python_fn", "module", "jamjet.agents.tool_runtime", "function", "dispatch_tool_calls",
                 "output_schema", "", "agent_tool_dispatch", true))));
         ir.put("edges", List.of());
         for (String empty : List.of("retry_policies", "models", "tools", "mcp_servers", "remote_agents")) {
@@ -311,6 +531,13 @@ class RuntimeContractIT {
                 .as("another application on the tenant does not see it").isEmpty();
         assertThat(reopened.getMessages(memoryId)).isEqualTo(messages);
 
+        var memory = findExecution(client, e -> JamjetChatMemoryStore.WORKFLOW_ID.equals(e.workflowId())
+                && memoryId.equals(e.initialInput().get("memory_id")));
+        if (holdsCalls(memory)) {
+            // Nothing claims the memory's node, so its execution stays open.
+            assertThat(client.getExecution(memory.executionId()).status()).isEqualTo("running");
+        }
+
         reopened.deleteMessages(memoryId);
         assertThat(new JamjetChatMemoryStore(client, "it-app").getMessages(memoryId)).isEmpty();
     }
@@ -320,7 +547,7 @@ class RuntimeContractIT {
     }
 
     @Test
-    void aWrappedLangChain4jServiceIsRecorded() {
+    void aWrappedLangChain4jServiceIsRecorded() throws Exception {
         var client = new JamjetRuntimeClient(props());
         String marker = "it-" + UUID.randomUUID();
         Assistant durable = JamjetDurableAgent.wrap(q -> "answer to " + q, Assistant.class, client);
@@ -332,6 +559,9 @@ class RuntimeContractIT {
         var completed = external(client.listEvents(execution.executionId()), JamjetDurableAgent.COMPLETED_EVENT);
         assertThat(completed.payload()).containsEntry("status", "completed")
                 .containsEntry("result", "answer to " + marker);
+        if (holdsCalls(execution)) {
+            assertThat(settled(client, execution.executionId()).status()).isEqualTo("completed");
+        }
     }
 
     @Test
@@ -355,11 +585,11 @@ class RuntimeContractIT {
             var resp = http.send(HttpRequest.newBuilder(URI.create(runtimeUrl + "/work-items/claim"))
                             .header("Content-Type", "application/json")
                             .POST(HttpRequest.BodyPublishers.ofString(
-                                    "{\"worker_id\":\"it\",\"queue_types\":[\"java_tool\"]}"))
+                                    "{\"worker_id\":\"it\",\"queue_types\":[\"python_tool\"]}"))
                             .build(),
                     HttpResponse.BodyHandlers.ofString());
             JsonNode body = JSON.readTree(resp.body());
-            // A shared runtime may hold other java_tool items; only ours must be withheld.
+            // A shared runtime may hold other python_tool items; only ours must be withheld.
             String claimedFor = body.path("work_item").path("execution_id").asText("").replace("-", "");
             assertThat(claimedFor)
                     .as("a gated dispatch is withheld, never handed out before approval")
